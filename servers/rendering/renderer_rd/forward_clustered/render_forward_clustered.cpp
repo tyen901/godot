@@ -624,7 +624,8 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				RD::get_singleton()->draw_list_draw(draw_list, index_array_rd.is_valid(), instance_count);
 			}
 			if (unlikely(geometry_profile.recording)) {
-				_record_geometry_profile_draw(surf, mesh_surface, element_info, p_params, i, draw_list, index_array_rd, instance_count, indirect, emulate_point_size, emulate_point_size ? RSE::PRIMITIVE_TRIANGLES : shader->uses_point_size ? RSE::PRIMITIVE_POINTS : surf->primitive);
+				_record_geometry_profile_draw(surf, mesh_surface, element_info, p_params, i, draw_list, index_array_rd, instance_count, indirect, emulate_point_size, emulate_point_size ? RSE::PRIMITIVE_TRIANGLES : shader->uses_point_size ? RSE::PRIMITIVE_POINTS
+																																																											  : surf->primitive);
 			}
 		}
 

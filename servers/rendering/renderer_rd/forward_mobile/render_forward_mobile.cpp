@@ -2331,6 +2331,7 @@ void RenderForwardMobile::_fill_render_list(RenderListType p_render_list, const 
 				surf->sort.lod_index = mesh_storage->mesh_surface_get_lod(surf->surface, inst->lod_model_scale * inst->lod_bias, lod_distance * p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, indices);
 				if (p_render_data->render_info) {
 					indices = _indices_to_primitives(surf->primitive, indices);
+					indices *= inst->instance_count;
 					if (p_render_list == RENDER_LIST_OPAQUE) { //opaque
 						p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += indices;
 					} else if (p_render_list == RENDER_LIST_SECONDARY) { //shadow

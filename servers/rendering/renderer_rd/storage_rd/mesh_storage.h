@@ -502,6 +502,18 @@ public:
 		}
 	}
 
+	_FORCE_INLINE_ uint32_t mesh_surface_get_selected_draw_count(void *p_surface, uint32_t p_lod, bool p_indexed) const {
+		const Mesh::Surface *surface = reinterpret_cast<const Mesh::Surface *>(p_surface);
+		if (!p_indexed) {
+			return surface->vertex_count;
+		}
+		if (p_lod == 0) {
+			return surface->index_count;
+		}
+		ERR_FAIL_UNSIGNED_INDEX_V(p_lod - 1, surface->lod_count, 0);
+		return surface->lods[p_lod - 1].index_count;
+	}
+
 	_FORCE_INLINE_ RID mesh_surface_get_index_array(void *p_surface, uint32_t p_lod) const {
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
 

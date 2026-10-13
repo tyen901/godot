@@ -76,6 +76,7 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
+	RSG::scene->geometry_profile_begin_frame();
 
 	TIMESTAMP_BEGIN()
 
@@ -113,6 +114,7 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 
 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->end_frame");
 	RSG::rasterizer->end_frame(p_swap_buffers);
+	RSG::scene->geometry_profile_end_frame();
 
 #ifndef XR_DISABLED
 	if (xr_server != nullptr) {
@@ -436,11 +438,97 @@ void RenderingServerDefault::set_physics_interpolation_enabled(bool p_enabled) {
 	RSG::scene->set_physics_interpolation_enabled(p_enabled);
 }
 
-Ref<RenderingPipelinePreparation> RenderingServerDefault::_geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) {
+Vector<Ref<RenderingPipelinePreparation>> RenderingServerDefault::_geometry_prepare_pipeline_snapshots(const Vector<GeometryPipelineConfiguration> &p_configurations) {
+	Vector<Ref<RenderingPipelinePreparation>> preparations;
 	if (pipeline_preparation_stopping) {
-		return Ref<RenderingPipelinePreparation>();
+		return preparations;
 	}
-	return RSG::scene->geometry_prepare_pipeline_snapshot(p_base, p_material_override, p_shadow_casting, p_use_skeleton);
+	for (const GeometryPipelineConfiguration &configuration : p_configurations) {
+		Ref<RenderingPipelinePreparation> preparation = RSG::scene->geometry_prepare_pipeline_snapshot(configuration.base_rid, configuration.material_rid, configuration.shadow_casting, configuration.use_skeleton);
+		if (preparation.is_valid()) {
+			preparation->retain_resources(configuration.base, configuration.material_override);
+		}
+		preparations.push_back(preparation);
+	}
+	return preparations;
+}
+
+Error RenderingServerDefault::_geometry_prepare_pipeline_configurations(const Vector<GeometryPipelineConfiguration> &p_configurations) {
+	ERR_FAIL_COND_V_MSG(create_thread && Thread::get_caller_id() == server_thread, ERR_BUSY, "Pipeline preparation must be called from a resource loader, not the rendering thread.");
+	Vector<Ref<RenderingPipelinePreparation>> preparations;
+	if (Thread::get_caller_id() == server_thread) {
+		command_queue.flush_if_pending();
+		preparations = _geometry_prepare_pipeline_snapshots(p_configurations);
+	} else {
+		command_queue.push_and_ret(this, &RenderingServerDefault::_geometry_prepare_pipeline_snapshots, &preparations, p_configurations);
+	}
+	if (preparations.size() != p_configurations.size()) {
+		return ERR_UNAVAILABLE;
+	}
+	for (const Ref<RenderingPipelinePreparation> &preparation : preparations) {
+		if (preparation.is_null()) {
+			return ERR_UNAVAILABLE;
+		}
+		if (preparation->error != OK) {
+			return preparation->error;
+		}
+	}
+
+	auto compile = [](void *p_userdata) {
+		Thread::set_name("PipelinePreparation");
+		const Vector<Ref<RenderingPipelinePreparation>> &jobs = *static_cast<Vector<Ref<RenderingPipelinePreparation>> *>(p_userdata);
+		for (const Ref<RenderingPipelinePreparation> &job : jobs) {
+			job->error = job->compile();
+			if (job->error != OK) {
+				break;
+			}
+		}
+	};
+	if (Thread::is_main_thread() || WorkerThreadPool::get_singleton()->get_caller_task_id() != WorkerThreadPool::INVALID_TASK_ID) {
+#ifdef THREADS_ENABLED
+		// One renderer dispatch snapshots the load unit; all native compiler work
+		// completes off the renderer without queuing commands back to its caller.
+		Thread worker;
+		worker.start(compile, &preparations);
+		ERR_FAIL_COND_V(!worker.is_started(), ERR_CANT_CREATE);
+		worker.wait_to_finish();
+#else
+		return ERR_UNAVAILABLE;
+#endif
+	} else {
+		compile(&preparations);
+	}
+	for (const Ref<RenderingPipelinePreparation> &preparation : preparations) {
+		if (preparation->error != OK) {
+			return preparation->error;
+		}
+	}
+	return OK;
+}
+
+Error RenderingServerDefault::geometry_prepare_pipelines_batch(const TypedArray<Dictionary> &p_configurations) {
+	ERR_FAIL_COND_V(p_configurations.is_empty(), ERR_INVALID_PARAMETER);
+	Vector<GeometryPipelineConfiguration> configurations;
+	for (int i = 0; i < p_configurations.size(); i++) {
+		const Dictionary input = p_configurations[i];
+		GeometryPipelineConfiguration configuration;
+		configuration.base = input.get("base", Variant());
+		configuration.material_override = input.get("material_override", Variant());
+		ERR_FAIL_COND_V(configuration.base.is_null(), ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(input.has("material_override") && !input["material_override"].is_null() && configuration.material_override.is_null(), ERR_INVALID_PARAMETER);
+		const Variant shadow_casting = input.get("shadow_casting", int(RSE::SHADOW_CASTING_SETTING_ON));
+		const Variant use_skeleton = input.get("use_skeleton", false);
+		ERR_FAIL_COND_V(shadow_casting.get_type() != Variant::INT || use_skeleton.get_type() != Variant::BOOL, ERR_INVALID_PARAMETER);
+		const int64_t shadow_casting_value = shadow_casting;
+		ERR_FAIL_COND_V(shadow_casting_value < RSE::SHADOW_CASTING_SETTING_OFF || shadow_casting_value > RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY, ERR_INVALID_PARAMETER);
+		configuration.shadow_casting = RSE::ShadowCastingSetting(shadow_casting_value);
+		configuration.use_skeleton = use_skeleton;
+		configuration.base_rid = configuration.base->get_rid();
+		configuration.material_rid = configuration.material_override.is_valid() ? configuration.material_override->get_rid() : RID();
+		ERR_FAIL_COND_V(configuration.base_rid.is_null() || (configuration.material_override.is_valid() && configuration.material_rid.is_null()), ERR_INVALID_PARAMETER);
+		configurations.push_back(configuration);
+	}
+	return _geometry_prepare_pipeline_configurations(configurations);
 }
 
 Error RenderingServerDefault::geometry_prepare_pipelines(const Ref<Resource> &p_base, const Ref<Resource> &p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) {
@@ -448,46 +536,21 @@ Error RenderingServerDefault::geometry_prepare_pipelines(const Ref<Resource> &p_
 	ERR_FAIL_COND_V(p_shadow_casting < RSE::SHADOW_CASTING_SETTING_OFF || p_shadow_casting > RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V_MSG(create_thread && Thread::get_caller_id() == server_thread, ERR_BUSY, "Pipeline preparation must be called from a resource loader, not the rendering thread.");
 
-	// Copies are intentional: Resource ownership lasts until every native worker
-	// has completed, even if the caller drops its references during this call.
-	Ref<Resource> base = p_base;
-	Ref<Resource> material_override = p_material_override;
-	RID base_rid = base->get_rid();
-	RID material_rid = material_override.is_valid() ? material_override->get_rid() : RID();
+	// Strong copies last until every native preparation job completes.
+	GeometryPipelineConfiguration configuration;
+	configuration.base = p_base;
+	configuration.material_override = p_material_override;
+	configuration.base_rid = configuration.base->get_rid();
+	configuration.material_rid = configuration.material_override.is_valid() ? configuration.material_override->get_rid() : RID();
+	configuration.shadow_casting = p_shadow_casting;
+	configuration.use_skeleton = p_use_skeleton;
+	const RID base_rid = configuration.base_rid;
+	const RID material_rid = configuration.material_rid;
+	const Ref<Resource> &material_override = configuration.material_override;
 	ERR_FAIL_COND_V(base_rid.is_null() || (material_override.is_valid() && material_rid.is_null()), ERR_INVALID_PARAMETER);
-	Ref<RenderingPipelinePreparation> preparation;
-	if (Thread::get_caller_id() == server_thread) {
-		command_queue.flush_if_pending();
-		preparation = _geometry_prepare_pipeline_snapshot(base_rid, material_rid, p_shadow_casting, p_use_skeleton);
-	} else {
-		command_queue.push_and_ret(this, &RenderingServerDefault::_geometry_prepare_pipeline_snapshot, &preparation, base_rid, material_rid, p_shadow_casting, p_use_skeleton);
-	}
-	if (preparation.is_null()) {
-		return ERR_UNAVAILABLE;
-	}
-	preparation->retain_resources(base, material_override);
-	if (preparation->error != OK) {
-		return preparation->error;
-	}
-
-	if (Thread::is_main_thread() || WorkerThreadPool::get_singleton()->get_caller_task_id() != WorkerThreadPool::INVALID_TASK_ID) {
-#ifdef THREADS_ENABLED
-		// Synchronous ResourceLoader calls still compile away from the renderer.
-		// Nothing in this worker queues a command back to the waiting main thread.
-		Thread worker;
-		worker.start([](void *p_userdata) {
-			Thread::set_name("PipelinePreparation");
-			RenderingPipelinePreparation *job = static_cast<RenderingPipelinePreparation *>(p_userdata);
-			job->error = job->compile();
-		}, preparation.ptr());
-		ERR_FAIL_COND_V(!worker.is_started(), ERR_CANT_CREATE);
-		worker.wait_to_finish();
-		return preparation->error;
-#else
-		return ERR_UNAVAILABLE;
-#endif
-	}
-	return preparation->compile();
+	Vector<GeometryPipelineConfiguration> configurations;
+	configurations.push_back(configuration);
+	return _geometry_prepare_pipeline_configurations(configurations);
 }
 
 /* EVENT QUEUING */

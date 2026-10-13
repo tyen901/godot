@@ -32,6 +32,7 @@
 
 #include "core/math/projection.h"
 #include "core/templates/paged_array.h"
+#include "core/variant/dictionary.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/rendering_pipeline_preparation.h"
 #include "servers/rendering/rendering_server_types.h"
@@ -66,6 +67,20 @@ public:
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) = 0;
 	virtual Ref<RenderingPipelinePreparation> geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) { return Ref<RenderingPipelinePreparation>(); }
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) = 0;
+
+	virtual int64_t request_geometry_profile() { return 0; }
+	virtual Dictionary get_geometry_profile() {
+		Dictionary result;
+		result["available"] = false;
+		result["pending"] = false;
+		result["completed"] = true;
+		result["request_id"] = int64_t(0);
+		result["unavailable_reason"] = "Geometry submission profiling requires Forward+.";
+		result["rows"] = Array();
+		return result;
+	}
+	virtual void geometry_profile_begin_frame() {}
+	virtual void geometry_profile_end_frame() {}
 
 	/* SDFGI UPDATE */
 

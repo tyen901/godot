@@ -1612,6 +1612,22 @@ Ref<RenderingPipelinePreparation> RendererSceneCull::geometry_prepare_pipeline_s
 	return scene_render->geometry_prepare_pipeline_snapshot(p_base, p_material_override, p_shadow_casting, p_use_skeleton);
 }
 
+int64_t RendererSceneCull::request_geometry_profile() {
+	return scene_render->request_geometry_profile();
+}
+
+Dictionary RendererSceneCull::get_geometry_profile() {
+	return scene_render->get_geometry_profile();
+}
+
+void RendererSceneCull::geometry_profile_begin_frame() {
+	scene_render->geometry_profile_begin_frame();
+}
+
+void RendererSceneCull::geometry_profile_end_frame() {
+	scene_render->geometry_profile_end_frame();
+}
+
 void RendererSceneCull::mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) {
 	scene_render->mesh_generate_pipelines(p_mesh, p_background_compilation);
 }

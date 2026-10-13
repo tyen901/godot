@@ -221,6 +221,59 @@ private:
 	struct GeometryInstanceSurfaceDataCache;
 	struct RenderElementInfo;
 
+	struct GeometryProfileLodInput {
+		float aabb_distance = 0.0;
+		float model_scale = 0.0;
+		float distance_multiplier = 0.0;
+		float distance_threshold = 0.0;
+		float screen_threshold = 0.0;
+		bool orthogonal = false;
+		bool selection_enabled = false;
+	};
+
+	struct GeometryProfileRow {
+		RID base;
+		RID mesh;
+		RID light;
+		RID light_base;
+		RID index_array;
+		RID framebuffer;
+		uint64_t draw_list_id = 0;
+		RSE::InstanceType base_type = RSE::INSTANCE_NONE;
+		RSE::PrimitiveType primitive = RSE::PRIMITIVE_MAX;
+		uint32_t surface_index = 0;
+		uint32_t selected_lod = 0;
+		uint32_t index_or_vertex_count = 0;
+		uint32_t instance_count = 0;
+		uint32_t repeat = 0;
+		PassMode pass_mode = PASS_MODE_COLOR;
+		uint32_t color_pass_flags = 0;
+		int shadow_pass = -1;
+		bool indirect = false;
+		bool indexed = false;
+		bool shadow_mesh_used = false;
+		bool point_size_emulated = false;
+		bool lod_input_available = false;
+		GeometryProfileLodInput lod_input;
+		AABB transformed_aabb;
+		Transform3D owner_transform;
+	};
+
+	struct GeometryProfile {
+		enum { MAX_ROWS = 65536 };
+		int64_t request_id = 0;
+		uint64_t native_frame_id = 0;
+		uint64_t start_ticks_usec = 0;
+		uint64_t end_ticks_usec = 0;
+		uint64_t dropped_rows = 0;
+		bool pending = false;
+		bool recording = false;
+		bool completed = false;
+		bool lod_inputs_truncated = false;
+		LocalVector<GeometryProfileRow> rows;
+		HashMap<const GeometryInstanceSurfaceDataCache *, GeometryProfileLodInput> surface_lod_inputs;
+	} geometry_profile;
+
 	struct RenderListParameters {
 		GeometryInstanceSurfaceDataCache **elements = nullptr;
 		RenderElementInfo *element_info = nullptr;
@@ -240,6 +293,10 @@ private:
 		bool use_directional_soft_shadow = false;
 		SceneShaderForwardClustered::ShaderSpecialization base_specialization = {};
 		bool use_material_feedback = false;
+		RenderListType profile_render_list = RENDER_LIST_OPAQUE;
+		RID profile_framebuffer;
+		RID profile_light;
+		int profile_shadow_pass = -1;
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}, bool p_use_material_feedback = false) {
 			elements = p_elements;
@@ -453,6 +510,8 @@ private:
 			bool flip_cull;
 
 			uint32_t uniform_buffer_index;
+			RID profile_light;
+			int profile_shadow_pass = -1;
 		};
 
 		LocalVector<ShadowPass> shadow_passes;
@@ -491,6 +550,8 @@ private:
 	_FORCE_INLINE_ void _render_list_template(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
 	void _render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
+
+	void _record_geometry_profile_draw(const GeometryInstanceSurfaceDataCache *p_surface, void *p_mesh_surface, const RenderElementInfo &p_element_info, const RenderListParameters *p_params, uint32_t p_element, RD::DrawListID p_draw_list, RID p_index_array, uint32_t p_instance_count, bool p_indirect, bool p_emulate_point_size, RSE::PrimitiveType p_primitive);
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
 	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false);
@@ -720,10 +781,14 @@ private:
 	struct RenderList {
 		LocalVector<GeometryInstanceSurfaceDataCache *> elements;
 		LocalVector<RenderElementInfo> element_info;
+		LocalVector<GeometryProfileLodInput> profile_lod_inputs;
+		LocalVector<bool> profile_lod_input_available;
 
 		void clear() {
 			elements.clear();
 			element_info.clear();
+			profile_lod_inputs.clear();
+			profile_lod_input_available.clear();
 		}
 
 		//should eventually be replaced by radix
@@ -805,7 +870,7 @@ private:
 
 	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
 	void _render_shadow_begin();
-	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
+	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D(), RID p_profile_light = RID(), int p_profile_shadow_pass = -1);
 	void _render_shadow_process();
 	void _render_shadow_end();
 
@@ -878,6 +943,11 @@ public:
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) override;
 	virtual Ref<RenderingPipelinePreparation> geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) override;
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) override;
+
+	virtual int64_t request_geometry_profile() override;
+	virtual Dictionary get_geometry_profile() override;
+	virtual void geometry_profile_begin_frame() override;
+	virtual void geometry_profile_end_frame() override;
 
 	/* SHADER LIBRARY */
 

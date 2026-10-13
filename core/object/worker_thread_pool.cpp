@@ -55,6 +55,7 @@ thread_local WorkerThreadPool::UnlockableLocks WorkerThreadPool::unlockable_lock
 #endif
 
 void WorkerThreadPool::_process_task(Task *p_task) {
+	Task *task_to_reclaim = nullptr;
 #ifdef THREADS_ENABLED
 	int pool_thread_index = thread_ids[Thread::get_caller_id()];
 	ThreadData &curr_thread = threads[pool_thread_index];
@@ -160,6 +161,10 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 				threads[i].signaled = true;
 			}
 		}
+		if (p_task->reclaim_requested && p_task->waiting_pool == 0 && p_task->waiting_user == 0) {
+			tasks.erase(p_task->self);
+			task_to_reclaim = p_task;
+		}
 	}
 
 #ifdef THREADS_ENABLED
@@ -175,11 +180,18 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 			}
 		}
 
+		if (task_to_reclaim) {
+			task_allocator.free(task_to_reclaim);
+		}
 		task_mutex.unlock();
 	}
 
 	set_current_thread_safe_for_nodes(safe_for_nodes_backup);
 	MessageQueue::set_thread_singleton_override(call_queue_backup);
+#else
+	if (task_to_reclaim) {
+		task_allocator.free(task_to_reclaim);
+	}
 #endif
 }
 
@@ -398,6 +410,18 @@ bool WorkerThreadPool::is_task_completed(TaskID p_task_id) const {
 	}
 
 	return (*taskp)->completed;
+}
+
+void WorkerThreadPool::release_task(TaskID p_task_id) {
+	MutexLock lock(task_mutex);
+	Task **taskp = tasks.getptr(p_task_id);
+	ERR_FAIL_NULL_MSG(taskp, "Invalid Task ID");
+	Task *task = *taskp;
+	task->reclaim_requested = true;
+	if (task->completed && task->waiting_pool == 0 && task->waiting_user == 0) {
+		tasks.erase(p_task_id);
+		task_allocator.free(task);
+	}
 }
 
 Error WorkerThreadPool::wait_for_task_completion(TaskID p_task_id) {

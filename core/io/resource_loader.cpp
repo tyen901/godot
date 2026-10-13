@@ -224,47 +224,31 @@ void ResourceFormatLoader::_bind_methods() {
 
 // This should be robust enough to be called redundantly without issues.
 void ResourceLoader::LoadToken::clear() {
-	WorkerThreadPool::TaskID task_to_await = 0;
-
+	WorkerThreadPool::TaskID task_to_release = 0;
 	{
 		MutexLock thread_load_lock(thread_load_mutex);
-		// User-facing tokens shouldn't be deleted until completely claimed.
 		DEV_ASSERT(user_rc == 0 && user_path.is_empty());
-
-		if (!local_path.is_empty()) {
-			if (task_if_unregistered) {
-				memdelete(task_if_unregistered);
-				task_if_unregistered = nullptr;
-			} else {
-				DEV_ASSERT(thread_load_tasks.has(local_path));
-				ThreadLoadTask &load_task = thread_load_tasks[local_path];
-				if (load_task.task_id && !load_task.awaited) {
-					task_to_await = load_task.task_id;
-				}
-				// Removing a task which is still in progress would be catastrophic.
-				// Tokens must be alive until the task thread function is done.
-				DEV_ASSERT(load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED);
-				thread_load_tasks.erase(local_path);
-			}
-			local_path.clear(); // Mark as already cleared.
-			if (task_to_await) {
-				for (KeyValue<String, ResourceLoader::ThreadLoadTask> &E : thread_load_tasks) {
-					if (E.value.task_id == task_to_await) {
-						task_to_await = 0;
-						break; // Same task is reused by nested loads, do not wait for completion here.
-					}
-				}
-			}
+		if (local_path.is_empty()) {
+			return;
 		}
+		ThreadLoadTask *task = task_if_unregistered ? task_if_unregistered : thread_load_tasks.getptr(local_path);
+		DEV_ASSERT(task);
+		DEV_ASSERT(task->status == THREAD_LOAD_FAILED || task->status == THREAD_LOAD_LOADED);
+		if (task->owns_task) {
+			task_to_release = task->task_id;
+		}
+		if (task_if_unregistered) {
+			memdelete(task_if_unregistered);
+			task_if_unregistered = nullptr;
+		} else {
+			thread_load_tasks.erase(local_path);
+		}
+		local_path.clear();
 	}
-
-	// If task is unused, await it here, locally, now the token data is consistent.
-	if (task_to_await) {
-		int load_nesting_backup = load_nesting;
-		load_nesting = 0;
-		WorkerThreadPool::get_singleton()->wait_for_task_completion(task_to_await);
-		DEV_ASSERT(load_nesting == 0);
-		load_nesting = load_nesting_backup;
+	// The last callback may be releasing its own token. Its task record is
+	// retired only after WorkerThreadPool has returned from that callback.
+	if (task_to_release) {
+		WorkerThreadPool::get_singleton()->release_task(task_to_release);
 	}
 }
 
@@ -332,9 +316,21 @@ Ref<Resource> ResourceLoader::_load(const String &p_path, const String &p_origin
 	ERR_FAIL_V_MSG(Ref<Resource>(), vformat("No loader found for resource: %s (expected type: %s)", p_path, !p_type_hint.is_empty() ? p_type_hint : "unknown"));
 }
 
+ResourceLoader::LoadTaskScope::~LoadTaskScope() {
+	MutexLock lock(thread_load_mutex);
+	DEV_ASSERT(pending_load_callbacks > 0);
+	pending_load_callbacks--;
+	if (token->unreference()) {
+		memdelete(token);
+	}
+}
+
 // This implementation must allow re-entrancy for a task that started awaiting in a deeper stack frame.
 // The load task token must be manually re-referenced before this is called, which includes threaded runs.
 void ResourceLoader::_run_load_task(void *p_userdata) {
+	// Declared first, released last: every local resource, queue and TLS access
+	// must be finished before the token can remove its ThreadLoadTask.
+	LoadTaskScope scope(static_cast<ThreadLoadTask *>(p_userdata)->load_token);
 	ThreadLoadTask &load_task = *(ThreadLoadTask *)p_userdata;
 	int thread_index = WorkerThreadPool::get_singleton()->get_thread_index();
 	String thread_waiting_on_backup;
@@ -499,14 +495,10 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 
 		if (cleaning_tasks) {
 			load_task.status = THREAD_LOAD_FAILED;
-			// Do not attempt to unreference the load token. Many things are
-			// tearing down concurrently and our task might be dead already. If it is
-			// the load token is already released.
 			return;
 		}
 
 		if (status != THREAD_LOAD_IN_PROGRESS) {
-			load_task.load_token->unreference();
 			thread_load_mutex.lock();
 			if (thread_waiting_on_backup.is_empty()) {
 				thread_waiting_on.erase(thread_index);
@@ -638,16 +630,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		thread_load_mutex.lock();
 	}
 
-	if (cleaning_tasks) {
-		// If we are cleaning don't wake up yielders here.
-		// And don't unreference the load token, it will get destroyed
-		// with the task later.
-		load_task.status = THREAD_LOAD_FAILED;
-		thread_load_mutex.unlock();
-		return;
-	}
-
-	if (load_task.error != OK) {
+	if (cleaning_tasks || load_task.error != OK) {
 		load_task.status = THREAD_LOAD_FAILED;
 	} else {
 		load_task.status = THREAD_LOAD_LOADED;
@@ -670,9 +653,6 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 	}
 
 	thread_load_mutex.unlock();
-
-	// It's safe now to let the task go in case no one else was grabbing the token.
-	load_task.load_token->unreference();
 
 	if (load_nesting == 0) {
 		if (own_mq_override) {
@@ -758,6 +738,9 @@ Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path,
 	ThreadLoadTask *load_task_ptr = nullptr;
 	{
 		MutexLock thread_load_lock(thread_load_mutex);
+		if (cleaning_tasks) {
+			return Ref<LoadToken>();
+		}
 
 		if (p_for_user) {
 			LoadToken *existing_token = _load_threaded_request_reuse_user_token(p_path);
@@ -832,6 +815,7 @@ Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path,
 		// which includes before the thread start, it may happen that no one is grabbing
 		// the token anymore so it's released.
 		load_task_ptr->load_token->reference();
+		pending_load_callbacks++;
 
 		if (p_thread_mode == LOAD_THREAD_FROM_CURRENT) {
 			// The current thread may happen to be a thread from the pool.
@@ -842,6 +826,7 @@ Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path,
 				load_task_ptr->thread_id = Thread::get_caller_id();
 			}
 		} else {
+			load_task_ptr->owns_task = true;
 			load_task_ptr->task_id = WorkerThreadPool::get_singleton()->add_native_task(&ResourceLoader::_run_load_task, load_task_ptr);
 		}
 	} // MutexLock(thread_load_mutex).
@@ -882,6 +867,23 @@ float ResourceLoader::_dependency_get_progress(const String &p_path) {
 	} else {
 		return 1.0; //assume finished loading it so it no longer exists
 	}
+}
+
+static void _run_main_load_callback(const Callable &p_callable, const Ref<RefCounted> &p_owner) {
+	// p_owner keeps a RefCounted target alive through the complete invocation.
+	(void)p_owner;
+	p_callable.callv(Array());
+}
+
+Error ResourceLoader::call_deferred_on_main_thread(const Callable &p_callable) {
+	ERR_FAIL_COND_V(!p_callable.is_valid(), ERR_INVALID_PARAMETER);
+	Ref<RefCounted> owner(Object::cast_to<RefCounted>(p_callable.get_object()));
+	return MessageQueue::get_main_singleton()->push_callable(callable_mp_static(_run_main_load_callback).bind(p_callable, owner));
+}
+
+bool ResourceLoader::has_pending_load(const String &p_path) {
+	MutexLock lock(thread_load_mutex);
+	return thread_load_tasks.has(_validate_local_path(p_path));
 }
 
 ResourceLoader::ThreadLoadStatus ResourceLoader::load_threaded_get_status(const String &p_path, float *r_progress) {
@@ -1026,6 +1028,7 @@ void ResourceLoader::notify_dependency_error(const String &p_path, const String 
 }
 
 Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Error *r_error, MutexLock<SafeBinaryMutex<BINARY_MUTEX_TAG>> &p_thread_load_lock) {
+	Ref<LoadToken> keep_alive(&p_load_token);
 	if (r_error) {
 		*r_error = OK;
 	}
@@ -1059,22 +1062,15 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 			bool loader_is_wtp = load_task.task_id != 0;
 			if (loader_is_wtp) {
 				// Loading thread is in the worker pool.
+				load_task.load_token->reference();
+				pending_load_callbacks++;
 				p_thread_load_lock.temp_unlock();
 
 				// The wtp won't let us wait on tasks that are older than us. But ResourceLoader has its own
 				// deadlock detection and prevention in _run_load_task(), rely on that instead.
-				load_task.load_token->reference();
 				_run_load_task(&load_task);
 
 				p_thread_load_lock.temp_relock();
-				load_task.awaited = true;
-				// Mark nested loads with the same task id as awaited.
-				for (KeyValue<String, ResourceLoader::ThreadLoadTask> &E : thread_load_tasks) {
-					if (E.value.task_id == load_task.task_id) {
-						E.value.awaited = true;
-					}
-				}
-
 				DEV_ASSERT(load_task.status == THREAD_LOAD_FAILED || load_task.status == THREAD_LOAD_LOADED);
 			} else if (load_task.need_wait) {
 				// Loading thread is main or user thread.
@@ -1116,6 +1112,9 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 				DEV_ASSERT(load_task_ptr->parent_task != load_task_ptr);
 				for (const ThreadLoadTask::ResourceChangedConnection &rcc : load_task_ptr->resource_changed_connections) {
 					load_task_ptr->parent_task->resource_changed_connections.push_back(rcc);
+					// The propagated connection still contains a raw source pointer.
+					// Transfer its owner before the child token can be retired.
+					load_task_ptr->parent_task->resource_dependencies.push_back(rcc.source);
 				}
 				load_task_ptr->connections_propagated = true;
 			}
@@ -1589,7 +1588,6 @@ void ResourceLoader::clear_thread_load_tasks() {
 	cleaning_tasks = true;
 
 	while (true) {
-		bool none_running = true;
 		for (int tid : yielders) {
 			WorkerThreadPool::get_singleton()->notify_yield_over(tid);
 		}
@@ -1600,11 +1598,10 @@ void ResourceLoader::clear_thread_load_tasks() {
 						E.value.cond_var->notify_all();
 					}
 					E.value.need_wait = false;
-					none_running = false;
 				}
 			}
 		}
-		if (none_running) {
+		if (pending_load_callbacks == 0) {
 			break;
 		}
 
@@ -1625,10 +1622,13 @@ void ResourceLoader::clear_thread_load_tasks() {
 		DEV_ASSERT(user_token->user_rc > 0 && !user_token->user_path.is_empty());
 		user_token->user_path.clear();
 		user_token->user_rc = 0;
-		user_token->unreference();
+		if (user_token->unreference()) {
+			memdelete(user_token);
+		}
 	}
 
-	thread_load_tasks.clear();
+	// Any caller still holding an internal LoadToken owns its table entry.
+	// Do not invalidate that caller's pointer during shutdown.
 	thread_waiting_on.clear();
 	// yielders is already guaranteed to be empty now
 
@@ -1796,6 +1796,7 @@ HashMap<int, String> ResourceLoader::thread_waiting_on;
 LocalVector<int> ResourceLoader::yielders;
 
 bool ResourceLoader::cleaning_tasks = false;
+uint32_t ResourceLoader::pending_load_callbacks = 0;
 
 HashMap<String, ResourceLoader::LoadToken *> ResourceLoader::user_load_tokens;
 

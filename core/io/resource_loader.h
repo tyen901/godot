@@ -198,7 +198,7 @@ private:
 		ThreadLoadTask *parent_task = nullptr;
 		HashSet<String> sub_tasks;
 
-		bool awaited : 1; // If it's in the pool, this helps not awaiting from more than one dependent thread.
+		bool owns_task : 1; // Only ResourceLoader-created pool tasks are retired by the token.
 		bool need_wait : 1;
 		bool in_progress_check : 1; // Measure against recursion cycles in progress reporting. Cycles are not expected, but can happen due to how it's currently implemented.
 		bool use_sub_threads : 1;
@@ -214,7 +214,7 @@ private:
 		LocalVector<ResourceChangedConnection> resource_changed_connections;
 
 		ThreadLoadTask() :
-				awaited(false),
+				owns_task(false),
 				need_wait(true),
 				in_progress_check(false),
 				use_sub_threads(false),
@@ -222,6 +222,13 @@ private:
 				finished_load(false),
 				connections_propagated(false) {}
 	};
+	struct LoadTaskScope {
+		LoadToken *token;
+		explicit LoadTaskScope(LoadToken *p_token) :
+				token(p_token) {}
+		~LoadTaskScope();
+	};
+	static uint32_t pending_load_callbacks;
 	static void _run_load_task(void *p_userdata);
 
 	static thread_local bool import_thread;
@@ -247,6 +254,9 @@ private:
 
 public:
 	static Error load_threaded_request(const String &p_path, const String &p_type_hint = "", bool p_use_sub_threads = false, CacheMode p_cache_mode = CACHE_MODE_REUSE);
+	// Includes terminal callbacks and unconsumed user tokens for this cache path.
+	static bool has_pending_load(const String &p_path);
+	static Error call_deferred_on_main_thread(const Callable &p_callable);
 	static ThreadLoadStatus load_threaded_get_status(const String &p_path, float *r_progress = nullptr);
 	static Ref<Resource> load_threaded_get(const String &p_path, Error *r_error = nullptr);
 

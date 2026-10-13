@@ -38,6 +38,14 @@ TEST_FORCE_LINK(test_worker_thread_pool)
 #include "core/os/semaphore.h"
 #include "core/os/thread.h"
 
+struct WorkerThreadPoolTestAccess {
+	static uint32_t user_waiters(WorkerThreadPool &p_pool, WorkerThreadPool::TaskID p_task) {
+		MutexLock lock(p_pool.task_mutex);
+		auto task = p_pool.tasks.getptr(p_task);
+		return task ? (*task)->waiting_user : 0;
+	}
+};
+
 namespace TestWorkerThreadPool {
 
 static LocalVector<SafeNumeric<int>> counter;
@@ -482,6 +490,104 @@ TEST_CASE("[WorkerThreadPool] Native completion inherits pump exclusion through 
 	CHECK(pool.wait_for_task_completion(pump) == OK);
 	CHECK(fixture.dependency_skipped_pump.is_set());
 	CHECK(fixture.pump_ran.is_set());
+}
+
+struct NativeTaskRetirement {
+	WorkerThreadPool *pool = nullptr;
+	Semaphore entered;
+	Semaphore finish;
+	SafeFlag callback_finished;
+	SafeFlag parent_finished;
+	WorkerThreadPool::TaskID child = WorkerThreadPool::INVALID_TASK_ID;
+	Error waited = FAILED;
+};
+
+static void retire_current_native_task(void *p_userdata) {
+	NativeTaskRetirement *fixture = static_cast<NativeTaskRetirement *>(p_userdata);
+	fixture->pool->release_task(fixture->pool->get_caller_task_id());
+	fixture->entered.post();
+	fixture->finish.wait();
+	fixture->callback_finished.set();
+}
+
+static void wait_for_retiring_native_task(void *p_userdata) {
+	NativeTaskRetirement *fixture = static_cast<NativeTaskRetirement *>(p_userdata);
+	fixture->child = fixture->pool->add_native_task(retire_current_native_task, fixture, true);
+	fixture->waited = fixture->pool->wait_for_task_completion_without_reclaim(fixture->child);
+	fixture->parent_finished.set();
+}
+
+TEST_CASE("[WorkerThreadPool] Native retirement keeps its callback and registered waiter alive") {
+	WorkerThreadPool pool(false);
+	pool.init(1);
+	NativeTaskRetirement fixture;
+	fixture.pool = &pool;
+	// The only worker enters a collaborative wait before running the child.
+	WorkerThreadPool::TaskID parent = pool.add_native_task(wait_for_retiring_native_task, &fixture, true);
+	fixture.entered.wait();
+	CHECK_FALSE(pool.is_task_completed(fixture.child));
+	CHECK_FALSE(fixture.parent_finished.is_set());
+	fixture.finish.post();
+	CHECK(pool.wait_for_task_completion(parent) == OK);
+	CHECK(fixture.callback_finished.is_set());
+	CHECK(fixture.parent_finished.is_set());
+	CHECK(fixture.waited == OK);
+	ERR_PRINT_OFF;
+	CHECK(pool.wait_for_task_completion(fixture.child) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
+}
+
+TEST_CASE("[WorkerThreadPool] Native retirement also releases an already completed task") {
+	WorkerThreadPool pool(false);
+	pool.init(1);
+	CollaborativeCompletionFixture fixture;
+	fixture.pool = &pool;
+	WorkerThreadPool::TaskID task = pool.add_native_task(collaborative_completion_child, &fixture, true);
+	CHECK(pool.wait_for_task_completion_without_reclaim(task) == OK);
+	CHECK(fixture.ran.get() == 1);
+	pool.release_task(task);
+	ERR_PRINT_OFF;
+	CHECK(pool.wait_for_task_completion(task) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
+}
+
+struct UserRetirementWaiter {
+	WorkerThreadPool *pool = nullptr;
+	WorkerThreadPool::TaskID task = WorkerThreadPool::INVALID_TASK_ID;
+	Semaphore finish;
+	Error result = FAILED;
+};
+
+static void user_retirement_work(void *p_userdata) {
+	static_cast<UserRetirementWaiter *>(p_userdata)->finish.wait();
+}
+
+static void user_retirement_wait(void *p_userdata) {
+	UserRetirementWaiter *fixture = static_cast<UserRetirementWaiter *>(p_userdata);
+	fixture->result = fixture->pool->wait_for_task_completion_without_reclaim(fixture->task);
+}
+
+TEST_CASE("[WorkerThreadPool] Native retirement preserves an already registered user waiter") {
+	WorkerThreadPool pool(false);
+	pool.init(1);
+	UserRetirementWaiter fixture;
+	fixture.pool = &pool;
+	fixture.task = pool.add_native_task(user_retirement_work, &fixture, true);
+	Thread waiter;
+	waiter.start(user_retirement_wait, &fixture);
+	uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 5000000;
+	while (WorkerThreadPoolTestAccess::user_waiters(pool, fixture.task) == 0 && OS::get_singleton()->get_ticks_usec() < deadline) {
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(WorkerThreadPoolTestAccess::user_waiters(pool, fixture.task) == 1);
+	pool.release_task(fixture.task);
+	CHECK_FALSE(pool.is_task_completed(fixture.task));
+	fixture.finish.post();
+	waiter.wait_to_finish();
+	CHECK(fixture.result == OK);
+	ERR_PRINT_OFF;
+	CHECK(pool.wait_for_task_completion(fixture.task) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
 }
 
 #endif

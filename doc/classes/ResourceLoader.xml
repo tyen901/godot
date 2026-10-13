@@ -23,6 +23,13 @@
 				This method is performed implicitly for ResourceFormatLoaders written in GDScript (see [ResourceFormatLoader] for more information).
 			</description>
 		</method>
+		<method name="call_deferred_on_main_thread">
+			<return type="int" enum="Error" />
+			<param index="0" name="callable" type="Callable" />
+			<description>
+				Queues [param callable] on the engine's main-thread message queue. Unlike [method Callable.call_deferred], this does not use a resource worker's temporary local queue. Custom loaders can use it to publish main-thread callbacks and transfer scoped resource owners. Returns [constant OK] when queued. RefCounted callable targets and bound resource arguments remain owned until delivery finishes. Non-RefCounted targets must remain alive until delivery.
+			</description>
+		</method>
 		<method name="exists">
 			<return type="bool" />
 			<param index="0" name="path" type="String" />
@@ -84,6 +91,14 @@
 			<description>
 				Returns whether a cached resource is available for the given [param path].
 				Once a resource has been loaded by the engine, it is cached in memory for faster access, and future calls to the [method load] method will use the cached version. The cached resource can be overridden by using [method Resource.take_over_path] on a new resource for that same path.
+			</description>
+		</method>
+		<method name="has_pending_load">
+			<return type="bool" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Returns whether the canonical cache path still has a native load transaction. This includes unconsumed threaded requests and terminal callbacks that still own the transaction after [method load_threaded_get] returns. Returns [code]false[/code] only after that transaction's callbacks, local resource releases, and task-table cleanup finish.
+				This is a read-only lifetime observation for cache-reusing loads. It neither starts loading nor retains a resource. A newer request for the same path keeps the result [code]true[/code]; use [method load_threaded_get_status] for the public request's result status. Independently unregistered overlapping cache-ignoring loads are not represented by this path query.
 			</description>
 		</method>
 		<method name="list_directory">

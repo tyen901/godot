@@ -43,6 +43,9 @@
 
 class WorkerThreadPool : public Object {
 	GDCLASS(WorkerThreadPool, Object)
+#ifdef TESTS_ENABLED
+	friend struct WorkerThreadPoolTestAccess;
+#endif
 public:
 	enum {
 		INVALID_TASK_ID = -1
@@ -254,6 +257,9 @@ public:
 	// Native owners can retain a completion record for repeated/concurrent waits.
 	// They must reclaim it with wait_for_task_completion after all users join.
 	Error wait_for_task_completion_without_reclaim(TaskID p_task_id);
+	// Native ownership transfer, not a wait. The callback and registered waiters
+	// keep the task alive; no new users may acquire its ID after release.
+	void release_task(TaskID p_task_id);
 
 	// One-shot native completion, owned by its caller rather than the task registry.
 	// Never queued or assigned a TaskID. Keep it alive until its producer and all

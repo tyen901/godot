@@ -356,6 +356,13 @@ bool GeometryInstance3D::_get(const StringName &p_name, Variant &r_ret) const {
 }
 
 void GeometryInstance3D::_get_property_list(List<PropertyInfo> *p_list) const {
+	// A newly constructed default has no shader parameters. ClassDB queries
+	// its property list while holding its write lock; synchronizing with the
+	// render thread here can deadlock a main-thread ClassDB reader.
+	if (get_base().is_null() && material_override.is_null() && material_overlay.is_null() && instance_shader_parameters.is_empty()) {
+		return;
+	}
+
 	List<PropertyInfo> pinfo;
 	RS::get_singleton()->instance_geometry_get_shader_parameter_list(get_instance(), &pinfo);
 	for (PropertyInfo &pi : pinfo) {

@@ -44,6 +44,7 @@
 class WorkerThreadPool : public Object {
 	GDCLASS(WorkerThreadPool, Object)
 	friend struct WorkerThreadPoolTestAccess;
+
 public:
 	enum {
 		INVALID_TASK_ID = -1

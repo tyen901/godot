@@ -65,64 +65,29 @@ void StreamedTexture2D::_requested_normal(void *p_ud) {
 	request_normal_callback(ctex);
 }
 
-void StreamedTexture2D::texture_reload(uint8_t p_mip_level) {
+Error StreamedTexture2D::texture_reload(uint8_t p_mip_level) {
 	GodotProfileZone("StreamedTexture2D::texture_reload");
-
-	ERR_FAIL_COND(texture.is_null());
-	ERR_FAIL_COND(path_to_file.is_empty());
-
-	const bool verbose_logging = OS::get_singleton()->is_stdout_verbose();
-	uint64_t start_time = 0;
-	if (verbose_logging) {
-		start_time = OS::get_singleton()->get_ticks_msec();
+	ERR_FAIL_COND_V(texture.is_null() || path_to_file.is_empty(), ERR_UNCONFIGURED);
+	uint8_t new_mip = uint8_t(MIN(uint32_t(p_mip_level), num_mipmaps));
+	if (_current_mip.load() == new_mip) {
+		return OK;
 	}
-
-	// Clamp cached current mip to what is actually available in file.
-	uint32_t current_mip = MIN((uint32_t)_current_mip.load(), num_mipmaps);
-	if (current_mip != _current_mip.load()) {
-		_current_mip.store((uint8_t)current_mip);
-	}
-
-	uint32_t new_mip = MIN((uint32_t)p_mip_level, num_mipmaps);
-
-	// If the requested mip level is the same as the current, do nothing.
-	if (current_mip == new_mip) {
-		return;
-	}
-
-	_current_mip.store((uint8_t)new_mip); // Atomic store
-
-	// Recreate the texture at the new mip level.
 	StreamedTexture2DLoadData load_data;
 	load_data.image.instantiate();
-	Error err = _load_data(path_to_file, _current_mip.load(), load_data);
-	if (err != OK) {
-		ERR_PRINT(vformat("Failed to load texture data for %s. Falling back to full reload.", path_to_file));
-		_load_internal(path_to_file, false);
-		return;
-	}
-
+	Error err = _load_data(path_to_file, new_mip, load_data);
+	ERR_FAIL_COND_V(err != OK, err);
+	ERR_FAIL_COND_V(load_data.image->is_empty(), ERR_INVALID_DATA);
 	RID new_texture = RS::get_singleton()->texture_2d_create(load_data.image);
-	if (new_texture.is_null()) {
-		ERR_PRINT(vformat("Failed to create new texture for %s. Falling back to full reload.", path_to_file));
-		_load_internal(path_to_file, false);
-		return;
-	}
-
-	RenderingServer::get_singleton()->texture_set_path(new_texture, path_to_file);
+	ERR_FAIL_COND_V(new_texture.is_null(), ERR_CANT_CREATE);
+	RS::get_singleton()->texture_set_path(new_texture, path_to_file);
 	RS::get_singleton()->texture_replace_compatible(texture, new_texture);
-
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
-	// Re-attach streaming state after texture replacement if streaming is active.
 	if (use_streaming && streaming_state.is_valid()) {
 		RS::get_singleton()->texture_2d_attach_streaming_state(texture, streaming_state);
 	}
 #endif
-
-	if (verbose_logging) {
-		const uint64_t end_time = OS::get_singleton()->get_ticks_msec();
-		print_verbose(vformat("Streamed texture %s reloaded (%dx%d) in %d ms (start=%d, end=%d)", path_to_file, w, h, end_time - start_time, start_time, end_time));
-	}
+	_current_mip.store(new_mip);
+	return OK;
 }
 
 Error StreamedTexture2D::_parse_header(const String &p_path, StreamedTextureFileHeader &r_header, Ref<FileAccess> &r_file) {
@@ -386,7 +351,7 @@ Error StreamedTexture2D::_load_internal(const String &p_path, bool p_load_settin
 					h,
 					min_lod_override,
 					max_lod_override,
-					callable_mp(this, &StreamedTexture2D::texture_reload));
+					callable_mp(this, &StreamedTexture2D::texture_reload), _current_mip.load());
 		} else {
 			TextureStreaming::get_singleton()->texture_update(streaming_state, w, h, min_lod_override, max_lod_override);
 		}
@@ -415,7 +380,64 @@ Error StreamedTexture2D::_load_internal(const String &p_path, bool p_load_settin
 	return OK;
 }
 
+Ref<StreamedTexture2D> StreamedTexture2D::create_from_provider(const Ref<Image> &p_initial_image, const Vector2i &p_original_size, int p_initial_mip, const Callable &p_provider, Object *p_owner) {
+#ifndef MODULE_TEXTURE_STREAMING_ENABLED
+	ERR_FAIL_V_MSG(Ref<StreamedTexture2D>(), "Texture streaming requires RenderingDevice support.");
+#else
+	ERR_FAIL_NULL_V(p_owner, Ref<StreamedTexture2D>());
+	ERR_FAIL_COND_V(!p_provider.is_valid(), Ref<StreamedTexture2D>());
+	ERR_FAIL_COND_V(p_initial_image.is_null() || p_initial_image->is_empty(), Ref<StreamedTexture2D>());
+	ERR_FAIL_COND_V(p_original_size.x <= 0 || p_original_size.y <= 0 || p_original_size.x > 16384 || p_original_size.y > 16384, Ref<StreamedTexture2D>());
+	int mip_count = Image::get_image_required_mipmaps(p_original_size.x, p_original_size.y, p_initial_image->get_format());
+	ERR_FAIL_COND_V(p_initial_mip < 0 || p_initial_mip > MIN(mip_count, MAX_LOD_LEVEL), Ref<StreamedTexture2D>());
+	int width = MAX(1, p_original_size.x >> p_initial_mip);
+	int height = MAX(1, p_original_size.y >> p_initial_mip);
+	ERR_FAIL_COND_V(p_initial_image->get_width() != width || p_initial_image->get_height() != height || p_initial_image->get_mipmap_count() != Image::get_image_required_mipmaps(width, height, p_initial_image->get_format()), Ref<StreamedTexture2D>());
+	Ref<StreamedTexture2D> resource;
+	resource.instantiate();
+	ERR_FAIL_COND_V_MSG(!resource->use_streaming, Ref<StreamedTexture2D>(), "Provider textures require enabled texture streaming and the Forward+ or Mobile renderer.");
+	resource->w = p_original_size.x;
+	resource->h = p_original_size.y;
+	resource->format = p_initial_image->get_format();
+	resource->num_mipmaps = mip_count;
+	resource->provider_backed = true;
+	resource->_current_mip.store(p_initial_mip);
+	resource->texture = RS::get_singleton()->texture_2d_create(p_initial_image);
+	ERR_FAIL_COND_V(resource->texture.is_null(), Ref<StreamedTexture2D>());
+	resource->streaming_state = TextureStreaming::get_singleton()->texture_configure_streaming(resource->texture, resource->format, resource->w, resource->h, 0, mip_count + 1, p_provider, p_initial_mip, p_owner->get_instance_id());
+	ERR_FAIL_COND_V_MSG(resource->streaming_state.is_null(), Ref<StreamedTexture2D>(), "The texture provider owner has already been drained.");
+	return resource;
+#endif
+}
+
+int StreamedTexture2D::get_current_mip() const {
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	if (streaming_state.is_valid()) {
+		return TextureStreaming::get_singleton()->texture_get_status(streaming_state).x;
+	}
+#endif
+	return _current_mip.load();
+}
+
+Error StreamedTexture2D::get_streaming_error() const {
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	if (streaming_state.is_valid()) {
+		return Error(TextureStreaming::get_singleton()->texture_get_status(streaming_state).y);
+	}
+#endif
+	return OK;
+}
+
+void StreamedTexture2D::retry_streaming() {
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	if (streaming_state.is_valid()) {
+		TextureStreaming::get_singleton()->texture_retry(streaming_state);
+	}
+#endif
+}
+
 Error StreamedTexture2D::load(const String &p_path) {
+	ERR_FAIL_COND_V(provider_backed, ERR_UNAVAILABLE);
 	return _load_internal(p_path, true);
 }
 
@@ -425,6 +447,12 @@ Error StreamedTexture2D::load(const String &p_path) {
 // for the editor to update the displayed texture after changing LOD settings is to "change"
 // the texture so just do that.
 void StreamedTexture2D::update_texture() {
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	if (provider_backed) {
+		TextureStreaming::get_singleton()->texture_update(streaming_state, w, h, min_lod_override, max_lod_override);
+		return;
+	}
+#endif
 	_load_internal(path_to_file, false);
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
 	if (streaming_state.is_valid()) {
@@ -449,6 +477,10 @@ void StreamedTexture2D::reload_from_file() {
 }
 
 void StreamedTexture2D::_bind_methods() {
+	ClassDB::bind_static_method("StreamedTexture2D", D_METHOD("create_from_provider", "initial_image", "original_size", "initial_mip", "provider", "owner"), &StreamedTexture2D::create_from_provider);
+	ClassDB::bind_method(D_METHOD("get_current_mip"), &StreamedTexture2D::get_current_mip);
+	ClassDB::bind_method(D_METHOD("get_streaming_error"), &StreamedTexture2D::get_streaming_error);
+	ClassDB::bind_method(D_METHOD("retry_streaming"), &StreamedTexture2D::retry_streaming);
 	ClassDB::bind_method(D_METHOD("load", "path"), &StreamedTexture2D::load);
 	ClassDB::bind_method(D_METHOD("get_load_path"), &StreamedTexture2D::get_load_path);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "load_path", PROPERTY_HINT_FILE, "*.stex"), "load", "get_load_path");
@@ -533,10 +565,15 @@ void StreamedTexture2D::draw_rect_region(RID p_canvas_item, const Rect2 &p_rect,
 }
 
 bool StreamedTexture2D::has_alpha() const {
-	return false;
+	return provider_backed && (format == Image::FORMAT_LA8 || format == Image::FORMAT_RGBA8);
 }
 
 Ref<Image> StreamedTexture2D::get_image() const {
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	if (provider_backed) {
+		return TextureStreaming::get_singleton()->texture_get_provider_image(streaming_state, 0);
+	}
+#endif
 	return _load_image(path_to_file, 0);
 }
 
@@ -596,7 +633,7 @@ StreamedTexture2D::StreamedTexture2D() {
 
 StreamedTexture2D::~StreamedTexture2D() {
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
-	if (streaming_state.is_valid()) {
+	if (streaming_state.is_valid() && TextureStreaming::get_singleton()) {
 		TextureStreaming::get_singleton()->texture_remove(streaming_state);
 		streaming_state = RID();
 	}

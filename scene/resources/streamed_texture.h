@@ -98,9 +98,10 @@ class StreamedTexture2D : public Texture2D {
 	}
 
 	void update_texture();
-	void texture_reload(uint8_t p_mip_level);
+	Error texture_reload(uint8_t p_mip_level);
 	std::atomic<uint8_t> _current_mip = 0; // Atomic for thread-safe access from I/O thread
 	bool use_streaming = false;
+	bool provider_backed = false;
 
 	RID streaming_state;
 
@@ -138,6 +139,10 @@ public:
 	void set_min_lod_override(int p_min_lod);
 	int get_min_lod_override() const;
 
+	static Ref<StreamedTexture2D> create_from_provider(const Ref<Image> &p_initial_image, const Vector2i &p_original_size, int p_initial_mip, const Callable &p_provider, Object *p_owner);
+	int get_current_mip() const;
+	Error get_streaming_error() const;
+	void retry_streaming();
 	Error load(const String &p_path);
 
 	virtual Image::Format get_format() const override;

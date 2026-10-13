@@ -124,36 +124,43 @@ void TextureStreaming::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_memory_budget_bytes_used"), &TextureStreaming::get_memory_budget_bytes_used);
 
 	ClassDB::bind_method(D_METHOD("flush_texture_streaming"), &TextureStreaming::flush_texture_streaming);
+	ClassDB::bind_method(D_METHOD("remove_providers", "owner"), &TextureStreaming::remove_providers);
 
 	ADD_SIGNAL(MethodInfo("flush_completed"));
 }
 
-RID TextureStreaming::texture_configure_streaming(RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod, int p_max_lod, Callable p_reload_callable) {
+RID TextureStreaming::texture_configure_streaming(RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod, int p_max_lod, Callable p_reload_callable, int p_initial_mip, ObjectID p_provider_owner) {
 	ERR_FAIL_COND_V(p_texture.is_null(), RID());
 	ERR_FAIL_COND_V(p_width == 0, RID());
 	ERR_FAIL_COND_V(p_height == 0, RID());
 	ERR_FAIL_COND_V(!p_reload_callable.is_valid(), RID());
 
 	return push_and_wait<RID>("_texture_configure_streaming_impl", this, &TextureStreaming::_texture_configure_streaming_impl,
-			p_texture, p_format, p_width, p_height, p_min_lod, p_max_lod, p_reload_callable);
+			p_texture, p_format, p_width, p_height, p_min_lod, p_max_lod, p_reload_callable, p_initial_mip, p_provider_owner);
 }
 
-void TextureStreaming::_texture_configure_streaming_impl(Completion<RID> *p_completion, RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod, int p_max_lod, const Callable &p_reload_callable) {
+void TextureStreaming::_texture_configure_streaming_impl(Completion<RID> *p_completion, RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod, int p_max_lod, const Callable &p_reload_callable, int p_initial_mip, ObjectID p_provider_owner) {
 	print_verbose(vformat("TextureStreaming: Configuring streaming for texture RID(%d) size(%dx%d) format(%d) min_lod(%d) max_lod(%d)",
 			p_texture.get_id(), p_width, p_height, int(p_format), p_min_lod, p_max_lod));
 
+	if (p_provider_owner.is_valid() && retired_provider_owners.has(p_provider_owner)) {
+		p_completion->complete(RID());
+		return;
+	}
 	RID rid = streaming_info_owner.allocate_rid();
-	StreamingState state;
-	state.texture = p_texture;
-	state.format = p_format;
-	state.width = p_width;
-	state.height = p_height;
-	state.min_lod_override = uint8_t(CLAMP(p_min_lod, int(LOD_NO_OVERRIDE), int(MAX_LOD_OVERRIDE)));
-	state.max_lod_override = uint8_t(CLAMP(p_max_lod, int(LOD_NO_OVERRIDE), int(MAX_LOD_OVERRIDE)));
-	state.reload_callable = p_reload_callable;
-	state.current_mip.store(INVALID_MIP, std::memory_order_relaxed);
-	state.pending_reload_mip.store(INVALID_MIP, std::memory_order_relaxed);
-	state.requested_tick_msec = 0;
+	Ref<StreamingState> state;
+	state.instantiate();
+	state->texture = p_texture;
+	state->format = p_format;
+	state->width = p_width;
+	state->height = p_height;
+	state->min_lod_override = uint8_t(CLAMP(p_min_lod, int(LOD_NO_OVERRIDE), int(MAX_LOD_OVERRIDE)));
+	state->max_lod_override = uint8_t(CLAMP(p_max_lod, int(LOD_NO_OVERRIDE), int(MAX_LOD_OVERRIDE)));
+	state->reload_callable = p_reload_callable;
+	state->provider_owner = p_provider_owner;
+	state->current_mip.store(p_initial_mip, std::memory_order_relaxed);
+	state->pending_reload_mip.store(INVALID_MIP, std::memory_order_relaxed);
+	state->requested_tick_msec = 0;
 
 	streaming_info_owner.initialize_rid(rid, state);
 
@@ -163,24 +170,102 @@ void TextureStreaming::_texture_configure_streaming_impl(Completion<RID> *p_comp
 }
 
 void TextureStreaming::texture_remove(RID p_rid) {
+	ERR_FAIL_COND_MSG(texture_reload_thread.is_started() && Thread::get_caller_id() == texture_reload_thread.get_id(), "Texture providers must not destroy streamed textures from their callback.");
 	push_and_sync("_texture_remove_impl", this, &TextureStreaming::_texture_remove_impl, p_rid);
 }
 
 void TextureStreaming::_texture_remove_impl(CompletionVoid *p_completion, RID p_rid) {
-	StreamingState *state = streaming_info_owner.get_or_null(p_rid);
-	if (state) {
+	Ref<StreamingState> state = _get_state(p_rid);
+	if (state.is_valid()) {
 		state->removing.store(true, std::memory_order_relaxed);
 		state->pending_reload_mip.exchange(INVALID_MIP, std::memory_order_relaxed);
 		RS::get_singleton()->texture_2d_attach_streaming_state(state->texture, RID());
 
 		if (texture_reload_thread.is_started()) {
 			// Finalize removal on the I/O thread after any earlier reload jobs have drained.
-			io_command_queue.push_internal("_texture_remove_finalize", this, &TextureStreaming::_texture_remove_finalize, p_rid);
+			io_command_queue.push_internal("_texture_remove_finalize", this, &TextureStreaming::_texture_remove_finalize, p_rid, p_completion);
+			return; // The caller waits for I/O quiescence; the feedback thread does not.
 		} else {
-			streaming_info_owner.free(p_rid);
+			_free_state(p_rid);
 		}
 	}
+	if (p_completion) {
+		p_completion->complete();
+	}
+}
+
+Error TextureStreaming::remove_providers(Object *p_owner) {
+	ERR_FAIL_NULL_V(p_owner, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V_MSG(texture_reload_thread.is_started() && Thread::get_caller_id() == texture_reload_thread.get_id(), ERR_BUSY, "A provider cannot drain its own callback thread.");
+	push_and_sync("_remove_providers_impl", this, &TextureStreaming::_remove_providers_impl, p_owner->get_instance_id());
+	return OK;
+}
+
+void TextureStreaming::_remove_providers_impl(CompletionVoid *p_completion, ObjectID p_owner) {
+	retired_provider_owners.insert(p_owner);
+	for (RID rid : streaming_info_owner.get_owned_list()) {
+		Ref<StreamingState> state = _get_state(rid);
+		if (state.is_valid() && state->provider_owner == p_owner) {
+			_texture_remove_impl(nullptr, rid);
+		}
+	}
+	if (texture_reload_thread.is_started()) {
+		io_command_queue.push_internal("_complete_removal", this, &TextureStreaming::_complete_removal, p_completion);
+	} else {
+		p_completion->complete();
+	}
+}
+
+void TextureStreaming::_complete_removal(CompletionVoid *p_completion) {
+	command_queue.push_internal("_provider_remove_complete", this, &TextureStreaming::_provider_remove_complete, p_completion);
+}
+
+void TextureStreaming::_provider_remove_complete(CompletionVoid *p_completion) {
 	p_completion->complete();
+}
+
+Vector2i TextureStreaming::texture_get_status(RID p_rid) {
+	return push_and_wait<Vector2i>("_texture_status_impl", this, &TextureStreaming::_texture_status_impl, p_rid);
+}
+
+void TextureStreaming::_texture_status_impl(Completion<Vector2i> *p_completion, RID p_rid) {
+	Ref<StreamingState> state = _get_state(p_rid);
+	p_completion->complete(state.is_valid() && !state->removing.load() ? Vector2i(state->current_mip.load(), state->load_error.load()) : Vector2i(-1, ERR_UNCONFIGURED));
+}
+
+void TextureStreaming::texture_retry(RID p_rid) {
+	push_and_sync("_texture_retry_impl", this, &TextureStreaming::_texture_retry_impl, p_rid);
+}
+
+void TextureStreaming::_texture_retry_impl(CompletionVoid *p_completion, RID p_rid) {
+	Ref<StreamingState> state = _get_state(p_rid);
+	if (state.is_valid() && !state->removing.load()) {
+		state->pending_reload_mip.store(INVALID_MIP);
+		state->load_error.store(OK);
+	}
+	p_completion->complete();
+}
+
+Ref<Image> TextureStreaming::texture_get_provider_image(RID p_rid, int p_mip) {
+	ERR_FAIL_COND_V_MSG(texture_reload_thread.is_started() && Thread::get_caller_id() == texture_reload_thread.get_id(), Ref<Image>(), "Texture providers must not recursively request provider images.");
+	return push_and_wait<Ref<Image>>("_provider_image_request", this, &TextureStreaming::_provider_image_request, p_rid, p_mip);
+}
+
+void TextureStreaming::_provider_image_request(Completion<Ref<Image>> *p_completion, RID p_rid, int p_mip) {
+	if (texture_reload_thread.is_started()) {
+		io_command_queue.push_internal("_provider_image_impl", this, &TextureStreaming::_provider_image_impl, p_completion, p_rid, p_mip);
+	} else {
+		_provider_image_impl(p_completion, p_rid, p_mip);
+	}
+}
+
+void TextureStreaming::_provider_image_impl(Completion<Ref<Image>> *p_completion, RID p_rid, int p_mip) {
+	Ref<StreamingState> state = _get_state(p_rid);
+	Ref<Image> image;
+	if (state.is_valid() && state->provider_owner.is_valid() && !state->removing.load()) {
+		_call_image_provider(state.ptr(), p_mip, image);
+	}
+	p_completion->complete(image);
 }
 
 void TextureStreaming::texture_update(RID p_rid, int p_width, int p_height, int p_min_lod, int p_max_lod) {
@@ -188,10 +273,18 @@ void TextureStreaming::texture_update(RID p_rid, int p_width, int p_height, int 
 }
 
 void TextureStreaming::_texture_update_impl(CompletionVoid *p_completion, RID p_rid, int p_width, int p_height, int p_min_lod, int p_max_lod) {
-	StreamingState *state = streaming_info_owner.get_or_null(p_rid);
-	if (state) {
-		state->width = p_width;
-		state->height = p_height;
+	Ref<StreamingState> state = _get_state(p_rid);
+	if (state.is_valid()) {
+		if (state->provider_owner.is_valid()) {
+			if (state->width != p_width || state->height != p_height) {
+				ERR_PRINT("Original provider dimensions are immutable.");
+				p_completion->complete();
+				return;
+			}
+		} else {
+			state->width = p_width;
+			state->height = p_height;
+		}
 		state->min_lod_override = uint8_t(CLAMP(p_min_lod, int(LOD_NO_OVERRIDE), int(MAX_LOD_OVERRIDE)));
 		state->max_lod_override = uint8_t(CLAMP(p_max_lod, int(LOD_NO_OVERRIDE), int(MAX_LOD_OVERRIDE)));
 	}
@@ -319,10 +412,13 @@ void TextureStreaming::_stop_streaming() {
 
 	// Stop the feedback processing thread first — no more budget fitting or mip decisions.
 	command_queue.request_exit();
-	io_command_queue.request_exit();
-
 	feedback_buffer_thread.wait_to_finish();
+	// Feedback may enqueue final I/O commands while draining. Exit I/O only
+	// after that producer has stopped, so no callback is left behind.
+	io_command_queue.request_exit();
 	texture_reload_thread.wait_to_finish();
+	// I/O finalizers may have posted removals after the feedback thread exited.
+	command_queue.flush();
 
 	// Clean up feedback buffer pool. The MaterialFeedbackBuffer destructor
 	// schedules RD resource cleanup on the render thread via call_on_render_thread.
@@ -520,10 +616,10 @@ void TextureStreaming::_process_material_feedback_buffer(MaterialFeedbackBuffer 
 
 			const Vector<RID> &textures = info->textures;
 			for (RID texture_rid : textures) {
-				StreamingState *state = streaming_info_owner.get_or_null(texture_rid);
+				Ref<StreamingState> state = _get_state(texture_rid);
 
 				// If the texture has been deleted but the material hasn't updated the list of textures yet, skip it.
-				if (!state || state->removing.load(std::memory_order_relaxed)) {
+				if (state.is_null() || state->removing.load(std::memory_order_relaxed)) {
 					continue;
 				}
 
@@ -595,8 +691,8 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 	// Phase 1: Build candidate list with initial target mip levels.
 	uint64_t total_requested_bytes = 0;
 	for (uint32_t i = 0; i < buffers.size(); i++) {
-		StreamingState *state = streaming_info_owner.get_or_null(buffers[i]);
-		if (!state || state->removing.load(std::memory_order_relaxed)) {
+		Ref<StreamingState> state = _get_state(buffers[i]);
+		if (state.is_null() || state->removing.load(std::memory_order_relaxed)) {
 			continue;
 		}
 
@@ -615,7 +711,7 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 		texture_max_lod = MAX(texture_min_lod, texture_max_lod);
 
 		uint8_t selected_min_lod = MAX(system_min_lod, texture_min_lod);
-		uint8_t selected_max_lod = MIN(system_max_lod, texture_max_lod);
+		uint8_t selected_max_lod = MIN(MIN(system_max_lod, texture_max_lod), state->get_mip_count() - 1);
 		if (selected_min_lod > selected_max_lod) {
 			if (system_min_lod >= texture_max_lod) { // Fixes the boundary leak
 				selected_min_lod = texture_max_lod;
@@ -626,6 +722,8 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 			}
 		}
 
+		selected_min_lod = MIN(selected_min_lod, state->get_mip_count() - 1);
+		selected_max_lod = MIN(selected_max_lod, state->get_mip_count() - 1);
 		uint8_t raw_request_mip = state->feedback_mip;
 		state->request_mip = state->update(raw_request_mip, p_ticks_msec, 0.00005f);
 		uint8_t desired_mip = CLAMP(state->request_mip, selected_min_lod, selected_max_lod);
@@ -682,7 +780,7 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 			reduction_heap.clear();
 			reduction_heap.reserve(fit_candidates.size());
 			for (uint32_t i = 0; i < fit_candidates.size(); i++) {
-				if (fit_candidates[i].state && fit_candidates[i].target_mip < fit_candidates[i].max_lod) {
+				if (fit_candidates[i].state.is_valid() && fit_candidates[i].target_mip < fit_candidates[i].max_lod) {
 					reduction_heap.push_back(&fit_candidates[i]);
 				}
 			}
@@ -697,7 +795,7 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 				heap_size--;
 				FitCandidate *best = reduction_heap[heap_size];
 
-				if (!best->state || best->target_mip >= best->max_lod) {
+				if (best->state.is_null() || best->target_mip >= best->max_lod) {
 					continue;
 				}
 
@@ -706,7 +804,7 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 				uint8_t increased_mip = MIN(best->max_lod, uint8_t(previous_mip + 1));
 				if (increased_mip == previous_mip) {
 					// Already at minimum quality - mark exhausted and continue
-					best->state = nullptr;
+					best->state.unref();
 					continue;
 				}
 
@@ -737,8 +835,8 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 	uint64_t memory = 0;
 	for (uint32_t i = 0; i < fit_candidates.size(); i++) {
 		FitCandidate &candidate = fit_candidates[i];
-		StreamingState *state = candidate.state;
-		if (!state) {
+		Ref<StreamingState> state = candidate.state;
+		if (state.is_null()) {
 			continue;
 		}
 
@@ -754,7 +852,7 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 
 		// Queue a reload if the current mip still differs from fit_mip.
 		// Use candidate.target_mip directly — this thread is the sole writer of fit_mip.
-		if (cur != candidate.target_mip) {
+		if (cur != candidate.target_mip && state->load_error.load(std::memory_order_relaxed) == OK) {
 			uint8_t old_pending = state->pending_reload_mip.exchange(candidate.target_mip, std::memory_order_relaxed);
 			if (old_pending == INVALID_MIP) {
 				io_command_queue.push_internal("_do_texture_reload", this, &TextureStreaming::_do_texture_reload, candidate.state_rid);
@@ -785,8 +883,8 @@ void TextureStreaming::_texture_reload_thread_main() {
 }
 
 void TextureStreaming::_do_texture_reload(RID p_state_rid) {
-	StreamingState *state = streaming_info_owner.get_or_null(p_state_rid);
-	if (state == nullptr || state->removing.load(std::memory_order_relaxed)) {
+	Ref<StreamingState> state = _get_state(p_state_rid);
+	if (state.is_null() || state->removing.load(std::memory_order_relaxed) || state->load_error.load(std::memory_order_relaxed) != OK) {
 		return;
 	}
 
@@ -836,8 +934,38 @@ void TextureStreaming::_do_texture_reload(RID p_state_rid) {
 		next_mip = current + 1; // Reducing quality.
 	}
 
-	// Perform the actual texture reload at the new mip level.
-	state->reload_callable.call(next_mip);
+	Error error = OK;
+	if (state->provider_owner.is_valid()) {
+		Ref<Image> image;
+		error = _call_image_provider(state.ptr(), next_mip, image);
+		// Avoid publication when removal was already observed. A concurrent
+		// removal after this check is covered by the I/O fence and final re-detach.
+		if (state->removing.load(std::memory_order_relaxed)) {
+			return;
+		}
+		if (error == OK) {
+			RID replacement = RS::get_singleton()->texture_2d_create(image);
+			if (replacement.is_null()) {
+				error = ERR_CANT_CREATE;
+			} else {
+				RS::get_singleton()->texture_replace_compatible(state->texture, replacement);
+				RS::get_singleton()->texture_2d_attach_streaming_state(state->texture, p_state_rid);
+			}
+		}
+	} else {
+		Variant mip = next_mip;
+		const Variant *args[] = { &mip };
+		Variant result;
+		Callable::CallError call_error;
+		state->reload_callable.callp(args, 1, result, call_error);
+		error = call_error.error == Callable::CallError::CALL_OK && result.get_type() == Variant::INT ? Error(int(result)) : ERR_INVALID_DATA;
+	}
+	if (error != OK) {
+		state->load_error.store(error, std::memory_order_relaxed);
+		state->pending_reload_mip.store(INVALID_MIP, std::memory_order_relaxed);
+		ERR_PRINT(vformat("Texture streaming provider failed at mip %d (error %d); residency is unchanged and retries are suspended.", next_mip, error));
+		return;
+	}
 	state->current_mip.store(next_mip, std::memory_order_relaxed);
 
 	// If we haven't reached the target yet, requeue to keep stepping.
@@ -851,10 +979,41 @@ void TextureStreaming::_do_texture_reload(RID p_state_rid) {
 	}
 }
 
-void TextureStreaming::_texture_remove_finalize(RID p_state_rid) {
-	StreamingState *state = streaming_info_owner.get_or_null(p_state_rid);
-	if (state) {
-		streaming_info_owner.free(p_state_rid);
+Error TextureStreaming::_call_image_provider(StreamingState *p_state, int p_mip, Ref<Image> &r_image) {
+	Variant mip = p_mip;
+	const Variant *args[] = { &mip };
+	Variant result;
+	Callable::CallError error;
+	p_state->reload_callable.callp(args, 1, result, error);
+	if (error.error != Callable::CallError::CALL_OK || result.get_type() != Variant::OBJECT) {
+		return ERR_INVALID_DATA;
+	}
+	Ref<Image> image = result;
+	int width = MAX(1, int(p_state->width) >> p_mip);
+	int height = MAX(1, int(p_state->height) >> p_mip);
+	if (image.is_null() || image->is_empty() || image->get_width() != width || image->get_height() != height || image->get_format() != p_state->format || image->get_mipmap_count() != Image::get_image_required_mipmaps(width, height, p_state->format)) {
+		return ERR_INVALID_DATA;
+	}
+	r_image = image;
+	return OK;
+}
+
+void TextureStreaming::_texture_remove_finalize(RID p_state_rid, CompletionVoid *p_completion) {
+	// Free only on the feedback thread, after I/O has relinquished its pointer.
+	command_queue.push_internal("_texture_remove_complete", this, &TextureStreaming::_texture_remove_complete, p_state_rid, p_completion);
+}
+
+void TextureStreaming::_texture_remove_complete(RID p_state_rid, CompletionVoid *p_completion) {
+	Ref<StreamingState> state = _get_state(p_state_rid);
+	if (state.is_valid()) {
+		// All earlier calls have left I/O. Clear the extension callable even if
+		// a stale cancelled queue entry still retains the native state snapshot.
+		RS::get_singleton()->texture_2d_attach_streaming_state(state->texture, RID());
+		state->reload_callable = Callable();
+		_free_state(p_state_rid);
+	}
+	if (p_completion) {
+		p_completion->complete();
 	}
 }
 

@@ -66,6 +66,9 @@ protected:
 	static void _bind_methods();
 
 private:
+	struct CompletionVoid;
+	template <typename T>
+	struct Completion;
 	// Single-producer, single-consumer command queue used by the feedback and I/O threads.
 	class SimpleCommandQueue {
 		static const size_t MAX_COMMAND_SIZE = 1024;
@@ -309,7 +312,7 @@ private:
 	// All inter-thread visibility for the above is guaranteed by the command-queue
 	// mutexes (push → wait_and_flush). The atomics therefore only need atomicity
 	// (tear-free reads/writes), not ordering, so memory_order_relaxed is used.
-	struct StreamingState {
+	struct StreamingState : public RefCounted {
 		// Configuration
 		RID texture;
 		uint16_t width = 0;
@@ -318,6 +321,10 @@ private:
 
 		// Settings & Constraints (mip levels)
 		Callable reload_callable;
+		// Nonzero only for external Image providers. The state, not the Texture2D,
+		// owns the callable so an owner-scoped drain releases every extension hook.
+		ObjectID provider_owner;
+		std::atomic<Error> load_error{ OK };
 		uint8_t min_lod_override = LOD_NO_OVERRIDE; // Best quality mip level allowed
 		uint8_t max_lod_override = LOD_NO_OVERRIDE; // Worst quality mip level allowed
 
@@ -348,23 +355,6 @@ private:
 
 		StreamingState() {}
 
-		StreamingState(const StreamingState &p_other) {
-			texture = p_other.texture;
-			width = p_other.width;
-			height = p_other.height;
-			format = p_other.format;
-			reload_callable = p_other.reload_callable;
-			min_lod_override = p_other.min_lod_override;
-			max_lod_override = p_other.max_lod_override;
-			feedback_mip = p_other.feedback_mip;
-			request_mip = p_other.request_mip;
-			fit_mip = p_other.fit_mip.load(std::memory_order_relaxed);
-			current_mip = p_other.current_mip.load(std::memory_order_relaxed);
-			pending_reload_mip = p_other.pending_reload_mip.load(std::memory_order_relaxed);
-			removing = p_other.removing.load(std::memory_order_relaxed);
-			requested_tick_msec = p_other.requested_tick_msec;
-		}
-
 		float smoothed_mip = 15.0f; // Start at max mip (lowest quality)
 		uint64_t last_update_tick_msec = 0;
 
@@ -383,7 +373,20 @@ private:
 		}
 	};
 
-	RID_Owner<StreamingState, true> streaming_info_owner;
+	RID_Owner<Ref<StreamingState>, true> streaming_info_owner;
+	BinaryMutex state_owner_mutex;
+	Ref<StreamingState> _get_state(RID p_rid) {
+		MutexLock lock(state_owner_mutex);
+		const Ref<StreamingState> *state = streaming_info_owner.get_or_null(p_rid);
+		return state ? *state : Ref<StreamingState>();
+	}
+	void _free_state(RID p_rid) {
+		MutexLock lock(state_owner_mutex);
+		if (streaming_info_owner.owns(p_rid)) {
+			streaming_info_owner.free(p_rid);
+		}
+	}
+	HashSet<ObjectID> retired_provider_owners; // Feedback-thread-only; ObjectIDs include generations.
 
 	// Rendering feedback buffer and the RID map used to interpret its entries.
 	struct MaterialFeedbackBuffer {
@@ -444,7 +447,7 @@ private:
 	// Mip levels: 0 = full resolution (best quality), higher = lower quality
 	struct FitCandidate {
 		RID state_rid;
-		StreamingState *state = nullptr; // Pointer to the texture's streaming state (nullptr = exhausted/skip)
+		Ref<StreamingState> state; // Retains a snapshot during fitting and queued removal.
 		uint8_t min_lod = MIN_LOD_LEVEL; // Best quality mip level allowed
 		uint8_t max_lod = MAX_LOD_LEVEL; // Worst quality mip level allowed
 		uint8_t target_mip = 0; // Current target mip level (adjusted during budget fitting)
@@ -457,11 +460,11 @@ private:
 		_FORCE_INLINE_ bool operator()(const FitCandidate *p_a, const FitCandidate *p_b) const {
 			// Skip exhausted candidates (treat as lowest priority)
 			// Exhausted = already at max_lod (lowest quality)
-			if (!p_a->state || p_a->target_mip >= p_a->max_lod) {
+			if (p_a->state.is_null() || p_a->target_mip >= p_a->max_lod) {
 				return false; // 'a' is exhausted, so 'b' has priority
 			}
 
-			if (!p_b->state || p_b->target_mip >= p_b->max_lod) {
+			if (p_b->state.is_null() || p_b->target_mip >= p_b->max_lod) {
 				return true; // 'b' is exhausted, so 'a' has priority
 			}
 
@@ -511,7 +514,9 @@ private:
 	static void _texture_reload_thread_func(void *p_udata);
 	void _texture_reload_thread_main();
 	void _do_texture_reload(RID p_state_rid);
-	void _texture_remove_finalize(RID p_state_rid);
+	void _texture_remove_finalize(RID p_state_rid, CompletionVoid *p_completion);
+	Error _call_image_provider(StreamingState *p_state, int p_mip, Ref<Image> &r_image);
+	void _provider_image_impl(Completion<Ref<Image>> *p_completion, RID p_state_rid, int p_mip);
 
 	uint64_t next_io_op_ticks = 0;
 	std::atomic<uint64_t> texture_streaming_total_memory = 0;
@@ -598,9 +603,16 @@ private:
 	}
 
 	// Internal implementations usually called on the feedback thread.
-	void _texture_configure_streaming_impl(Completion<RID> *p_completion, RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod, int p_max_lod, const Callable &p_reload_callable);
+	void _texture_configure_streaming_impl(Completion<RID> *p_completion, RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod, int p_max_lod, const Callable &p_reload_callable, int p_initial_mip, ObjectID p_provider_owner);
 	void _texture_update_impl(CompletionVoid *p_completion, RID p_rid, int p_width, int p_height, int p_min_lod, int p_max_lod);
 	void _texture_remove_impl(CompletionVoid *p_completion, RID p_rid);
+	void _remove_providers_impl(CompletionVoid *p_completion, ObjectID p_owner);
+	void _complete_removal(CompletionVoid *p_completion);
+	void _provider_remove_complete(CompletionVoid *p_completion);
+	void _texture_remove_complete(RID p_rid, CompletionVoid *p_completion);
+	void _texture_status_impl(Completion<Vector2i> *p_completion, RID p_rid);
+	void _texture_retry_impl(CompletionVoid *p_completion, RID p_rid);
+	void _provider_image_request(Completion<Ref<Image>> *p_completion, RID p_rid, int p_mip);
 
 	void _process_material_feedback_buffer(MaterialFeedbackBuffer *p_mb, uint64_t p_ticks_msec);
 
@@ -627,9 +639,13 @@ public:
 	RID feedback_buffer_get_uniform_rid();
 
 	// Texture API - safe from any thread
-	RID texture_configure_streaming(RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod = 0, int p_max_lod = 0, Callable p_reload_callable = Callable());
+	RID texture_configure_streaming(RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod = 0, int p_max_lod = 0, Callable p_reload_callable = Callable(), int p_initial_mip = 0, ObjectID p_provider_owner = ObjectID());
 	void texture_update(RID p_rid, int p_width, int p_height, int p_min_lod, int p_max_lod);
 	void texture_remove(RID p_rid);
+	Vector2i texture_get_status(RID p_rid);
+	void texture_retry(RID p_rid);
+	Ref<Image> texture_get_provider_image(RID p_rid, int p_mip);
+	Error remove_providers(Object *p_owner);
 
 	// Material API
 	RID material_set_textures(RID p_feedback_rid, const Vector<RID> &p_textures);

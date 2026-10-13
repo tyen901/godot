@@ -24,6 +24,13 @@
 				Returns the current VRAM usage of streamed textures in bytes. This represents the total memory consumed by all streamed textures at their currently loaded mipmap levels.
 			</description>
 		</method>
+		<method name="remove_providers">
+			<return type="int" enum="Error" />
+			<param index="0" name="owner" type="Object" />
+			<description>
+				Permanently retires [param owner]'s external image providers, cancels queued requests, waits for active I/O callbacks, and releases their callable storage before returning. Other owners and file-backed textures remain active. The feedback thread keeps running during the barrier. Returns [constant ERR_BUSY] when called from a provider callback, which cannot drain itself. Extension shutdown must finish source factory calls before invoking this barrier and before unloading callback code. A retired owner cannot register new providers.
+			</description>
+		</method>
 	</methods>
 	<members>
 		<member name="max_lod_override" type="int" setter="set_max_lod_override" getter="get_max_lod_override" default="-1">

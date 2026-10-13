@@ -11,12 +11,37 @@
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="create_from_provider" qualifiers="static">
+			<return type="StreamedTexture2D" />
+			<param index="0" name="initial_image" type="Image" />
+			<param index="1" name="original_size" type="Vector2i" />
+			<param index="2" name="initial_mip" type="int" />
+			<param index="3" name="provider" type="Callable" />
+			<param index="4" name="owner" type="Object" />
+			<description>
+				Creates a native streamed texture from original mip data without an imported file. Streaming must be enabled on Forward+ or Mobile. [param initial_image] contains the complete mip suffix beginning at [param initial_mip], in its native format, while [param original_size] retains the full-resolution dimensions.
+				The thread-safe provider accepts an original mip index and synchronously returns a fresh [Image] with exactly that mip and all smaller levels through 1x1. Format and dimensions must match the source. Godot owns requests, budgeting, uploads and RID replacement. The callback runs on the texture I/O thread, must not schedule asynchronous completion, destroy streamed textures, recursively request provider images, or drain providers from inside itself. It must not retain streamed textures in its captured state. The caller must keep the callback target valid.
+				All provider callables are owned by native streaming state rather than this resource. Call [method TextureStreaming.remove_providers] with [param owner] before unloading an extension that implements them. After that barrier returns, no callable invocation or destructor for this owner remains; new registrations using that owner are rejected. Existing texture resources retain their last native image but are detached from streaming.
+			</description>
+		</method>
+		<method name="get_current_mip" qualifiers="const">
+			<return type="int" />
+			<description>Returns the successfully submitted resident source mip, or [code]-1[/code] after its provider owner has been drained. The logical resource dimensions remain the original size.</description>
+		</method>
+		<method name="get_streaming_error" qualifiers="const">
+			<return type="int" enum="Error" />
+			<description>Returns the latest provider validation/load error, [constant OK] while healthy, or [constant ERR_UNCONFIGURED] after owner drain. A failed request does not advance residency and suspends further requests until [method retry_streaming].</description>
+		</method>
 		<method name="load">
 			<return type="int" enum="Error" />
 			<param index="0" name="path" type="String" />
 			<description>
 				Loads the texture from the specified [param path].
 			</description>
+		</method>
+		<method name="retry_streaming">
+			<return type="void" />
+			<description>Clears a provider failure so native feedback can request a mip again. Does not change residency or restart a drained owner.</description>
 		</method>
 	</methods>
 	<members>

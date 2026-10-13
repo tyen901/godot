@@ -273,12 +273,15 @@ void main() {
 #else
 #define RT_STAGE_CLOSEST_HIT 1
 #endif
+// Keep dependency order: raytracing_inc.glsl defines MAX_VIEWS for scene_data_inc.glsl.
+// clang-format off
 #include "raytracing_inc.glsl"
 #include "../scene_data_inc.glsl"
 #include "raytracing_common_inc.glsl"
 #include "raytracing_samplers_inc.glsl"
 #include "raytracing_decal_data_inc.glsl"
 #include "raytracing_streaming_inc.glsl"
+// clang-format on
 #ifdef RT_DECAL_CALLABLE
 #include "raytracing_decal_callable_inc.glsl"
 #else

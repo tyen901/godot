@@ -285,4 +285,3 @@ vec3 rt_triangle_position(GeometryData geom, uint index) {
 	uint offset = index * (geom.position_stride >> 2u);
 	return vec3(vertices.v[offset], vertices.v[offset + 1u], vertices.v[offset + 2u]);
 }
-

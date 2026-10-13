@@ -19,7 +19,9 @@ struct RTDecalData {
 layout(set = 0, binding = 33) uniform accelerationStructureEXT decal_tlas;
 layout(set = 0, binding = 34, std430) readonly buffer DecalBuffer {
 	uint decal_count;
-	uint decal_pad0; uint decal_pad1; uint decal_pad2;
+	uint decal_pad0;
+	uint decal_pad1;
+	uint decal_pad2;
 	RTDecalData rt_decals[];
 };
 struct RTDecalCall {

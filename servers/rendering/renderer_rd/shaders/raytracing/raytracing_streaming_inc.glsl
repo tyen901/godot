@@ -4,7 +4,8 @@
 
 layout(set = 0, binding = 35, std430) buffer RTMaterialFeedbackBuffer {
 	uint data[];
-} rt_material_feedback;
+}
+rt_material_feedback;
 
 void rt_write_material_feedback(uint material_index, float footprint_sq) {
 	// The native buffer may not have grown to a newly allocated material yet.

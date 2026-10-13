@@ -29,9 +29,9 @@
 /**************************************************************************/
 
 #include "mesh_storage.h"
-#include "material_storage.h"
 
 #include "core/config/project_settings.h"
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_types.h"
@@ -2656,4 +2656,3 @@ void MeshStorage::skeleton_update_dependency(RID p_skeleton, DependencyTracker *
 
 	p_instance->update_dependency(&skeleton->dependency);
 }
-

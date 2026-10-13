@@ -3,7 +3,9 @@ layout(location = 0) callableDataEXT RTDecalCall decal_call;
 // A zero-length query enumerates all AABBs containing the actual ray hit.
 // Do not confirm candidates: confirmation would prune overlapping projectors.
 void apply_rt_decals(HitData h, inout MaterialResult material_result) {
-	if (decal_count == 0u) return;
+	if (decal_count == 0u) {
+		return;
+	}
 	vec3 original_normal = material_result.normal;
 	vec3 packed_normal = original_normal * (0.375 + 0.125 * (1.0 - material_result.roughness));
 	uint previous = 0u;
@@ -15,14 +17,22 @@ void apply_rt_decals(HitData h, inout MaterialResult material_result) {
 		rayQueryInitializeEXT(query, decal_tlas, 0u, 0xffu, h.hit_pos, 0.0, vec3(1.0, 0.0, 0.0), 0.0);
 		while (rayQueryProceedEXT(query)) {
 			uint index = rayQueryGetIntersectionInstanceCustomIndexEXT(query, false);
-			if (index < previous || index >= next) continue;
+			if (index < previous || index >= next) {
+				continue;
+			}
 			RTDecalData d = rt_decals[index];
-			if ((d.cull_mask & geometries[h.geometry_idx].layer_mask) == 0u) continue;
+			if ((d.cull_mask & geometries[h.geometry_idx].layer_mask) == 0u) {
+				continue;
+			}
 			vec3 local = (d.inverse_model * vec4(h.hit_pos, 1.0)).xyz;
-			if (any(greaterThan(abs(local), vec3(0.5)))) continue;
+			if (any(greaterThan(abs(local), vec3(0.5)))) {
+				continue;
+			}
 			next = index;
 		}
-		if (next == decal_count) break;
+		if (next == decal_count) {
+			break;
+		}
 		previous = next + 1u;
 		RTDecalData d = rt_decals[next];
 		if (!footprint_ready) {
@@ -48,14 +58,16 @@ void apply_rt_decals(HitData h, inout MaterialResult material_result) {
 				vec3 direction = mat3(camera) * (b.xyz / b.w - a.xyz / a.w);
 				derivatives[axis] = origin + direction * (dot(h.hit_pos - origin, plane_normal) / dot(direction, plane_normal)) - h.hit_pos;
 			}
-			dx = derivatives[0]; dy = derivatives[1];
+			dx = derivatives[0];
+			dy = derivatives[1];
 			footprint_ready = true;
 		}
 		if (d.callable_index != 0xffffffffu) {
 			decal_call.index = next;
 			decal_call.position = h.hit_pos;
 			decal_call.original_normal = original_normal;
-			decal_call.dx = dx; decal_call.dy = dy;
+			decal_call.dx = dx;
+			decal_call.dy = dy;
 			decal_call.material_coverage = 0.0;
 			decal_call.albedo_add = vec3(0);
 			decal_call.albedo_retain = vec3(1.0);
@@ -79,7 +91,9 @@ void apply_rt_decals(HitData h, inout MaterialResult material_result) {
 			vec2 ddy = (mat3(d.inverse_model) * dy).xz;
 			float fade = pow(max(0.0, 1.0 - 2.0 * abs(local.y)), local.y > 0.0 ? d.fades.x : d.fades.y) * d.fades.w;
 			vec3 projector_normal = normalize(d.model[1].xyz);
-			if (d.fades.z > 0.0) fade *= smoothstep(d.fades.z, 1.0, dot(h.geometry_normal, projector_normal) * .5 + .5);
+			if (d.fades.z > 0.0) {
+				fade *= smoothstep(d.fades.z, 1.0, dot(h.geometry_normal, projector_normal) * .5 + .5);
+			}
 			if (d.textures.x != 0xffffffffu) {
 				vec4 albedo = textureGrad(sampler2D(bindless_textures[nonuniformEXT(d.textures.x)], SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), uv, ddx, ddy) * d.modulate;
 				float coverage = albedo.a * fade;
@@ -99,7 +113,9 @@ void apply_rt_decals(HitData h, inout MaterialResult material_result) {
 				}
 				packed_normal = mix(packed_normal, normal * (.375 + .125 * smoothness), coverage);
 			}
-			if (d.textures.w != 0xffffffffu) material_result.emissive += textureGrad(sampler2D(bindless_textures[nonuniformEXT(d.textures.w)], SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), uv, ddx, ddy).rgb * d.parameters.y * fade * scene_data_block.data.emissive_exposure_normalization;
+			if (d.textures.w != 0xffffffffu) {
+				material_result.emissive += textureGrad(sampler2D(bindless_textures[nonuniformEXT(d.textures.w)], SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), uv, ddx, ddy).rgb * d.parameters.y * fade * scene_data_block.data.emissive_exposure_normalization;
+			}
 		}
 	}
 	material_result.normal = normalize(packed_normal);

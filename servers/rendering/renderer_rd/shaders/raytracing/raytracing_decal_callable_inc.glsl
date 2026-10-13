@@ -1,6 +1,6 @@
 layout(set = 1, binding = 0) uniform texture2D bindless_textures[];
 layout(location = 0) callableDataInEXT RTDecalCall decal_call;
-layout(buffer_reference, std140) readonly buffer CustomMaterialUniforms {
+layout(buffer_reference, std140) readonly buffer CustomMaterialUniforms{
 	/* RT_CUSTOM_UNIFORM_MEMBERS */
 };
 CustomMaterialUniforms material;

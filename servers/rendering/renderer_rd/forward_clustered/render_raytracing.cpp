@@ -79,8 +79,12 @@ RenderRaytracing::~RenderRaytracing() {
 	viewport_states.clear();
 
 	cleanup_caches();
-	if (decal_unit_blas.is_valid()) RD::get_singleton()->free_rid(decal_unit_blas);
-	if (decal_unit_buffer.is_valid()) RD::get_singleton()->free_rid(decal_unit_buffer);
+	if (decal_unit_blas.is_valid()) {
+		RD::get_singleton()->free_rid(decal_unit_blas);
+	}
+	if (decal_unit_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(decal_unit_buffer);
+	}
 
 	if (mat_ubo_pool_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(mat_ubo_pool_buffer);
@@ -130,8 +134,12 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 	if (!p_state) {
 		return;
 	}
-	if (p_state->decal_tlas.is_valid()) RD::get_singleton()->free_rid(p_state->decal_tlas);
-	if (p_state->decal_buffer.is_valid()) RD::get_singleton()->free_rid(p_state->decal_buffer);
+	if (p_state->decal_tlas.is_valid()) {
+		RD::get_singleton()->free_rid(p_state->decal_tlas);
+	}
+	if (p_state->decal_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(p_state->decal_buffer);
+	}
 	if (p_state->tlas.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->tlas);
 	}
@@ -446,7 +454,6 @@ uint32_t RenderRaytracing::get_rid_index(RID p_rid) {
 uint32_t RenderRaytracing::get_rid_version(RID p_rid) {
 	return static_cast<uint32_t>(p_rid.get_id() >> 32);
 }
-
 
 RTMaterialCacheEntry *RenderRaytracing::get_material_cache_entry(uint32_t p_index) {
 	uint32_t chunk_idx = p_index >> RT_CACHE_CHUNK_SHIFT;
@@ -1689,7 +1696,7 @@ bool RenderRaytracing::_build_merged_mm_blas(
 				}
 				merged_mm_pool.free(h);
 				h = RID();
-		}
+			}
 		}
 		mm_entry.per_surface.clear();
 		mm_entry.mm_validator = mm_validator;
@@ -2018,8 +2025,6 @@ bool RenderRaytracing::_build_merged_mm_blas(
 // TLAS creation (main entry point per frame)
 // ---------------------------------------------------------------------------
 
-
-
 uint32_t RenderRaytracing::_select_surface_lod(const void *p_instance_ptr, void *p_surface, const RenderDataRD *p_render_data) const {
 	const auto *p_instance = static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(p_instance_ptr);
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
@@ -2140,7 +2145,12 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			state->cached_pipeline_generation == rt_shader_singleton->get_pipeline_generation(p_rt_flags) &&
 			state->cached_scene_inputs.size() == scene_inputs.size();
 	bool lods_unchanged = true;
-	struct LODChange { const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surface; uint32_t lod; RTSurfaceData *data = nullptr; uint32_t selection = 0; };
+	struct LODChange {
+		const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surface;
+		uint32_t lod;
+		RTSurfaceData *data = nullptr;
+		uint32_t selection = 0;
+	};
 	LocalVector<LODChange> lod_changes;
 	bool ordered_inputs_match = state->cached_scene_inputs.size() == scene_inputs.size();
 	for (uint32_t i = 0; i < scene_inputs.size(); i++) {
@@ -2152,8 +2162,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		if (ordered_inputs_match && (input.instance != state->cached_scene_inputs[i].instance || input.revision != state->cached_scene_inputs[i].revision)) {
 			ordered_inputs_match = false;
 		}
-		if (inst && (inst->rt_procedural || inst->mesh_instance.is_valid() || !inst->data ||
-				(inst->data->base_type != RSE::INSTANCE_MESH && inst->data->base_type != RSE::INSTANCE_MULTIMESH))) {
+		if (inst && (inst->rt_procedural || inst->mesh_instance.is_valid() || !inst->data || (inst->data->base_type != RSE::INSTANCE_MESH && inst->data->base_type != RSE::INSTANCE_MULTIMESH))) {
 			static_scene = false;
 		}
 	}
@@ -2220,7 +2229,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			const auto &selection = state->lod_surfaces[i];
 			const auto *surface = static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(selection.surface);
 			const uint32_t lod = _select_surface_lod(surface->owner, surface->surface, p_render_data);
-			if (lod != selection.lod) { lods_unchanged = false; lod_changes.push_back({ surface, lod, nullptr, i }); }
+			if (lod != selection.lod) {
+				lods_unchanged = false;
+				lod_changes.push_back({ surface, lod, nullptr, i });
+			}
 		}
 	}
 	if (reuse_scene && !lods_unchanged) {
@@ -2228,7 +2240,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		state->scene_cached = false;
 		state->cached_pipeline_generation = UINT64_MAX;
 		for (LODChange &change : lod_changes) {
-			if (!state->surface_ranges.has(change.surface)) { continue; }
+			if (!state->surface_ranges.has(change.surface)) {
+				continue;
+			}
 			change.data = process_surface(change.surface, change.surface->surface,
 					mesh_storage->mesh_surface_get_rt_invalidation_counter(change.surface->surface), change.lod, change.surface->owner->transform, dirty_blas_list);
 			ERR_FAIL_COND_V(!change.data || !change.data->blas.is_valid(), nullptr);
@@ -2242,7 +2256,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		RD::ComputeListID compute = RD::get_singleton()->compute_list_begin();
 		for (const LODChange &change : lod_changes) {
 			RTViewportState::SurfaceRange *range = state->surface_ranges.getptr(change.surface);
-			if (!range) { continue; }
+			if (!range) {
+				continue;
+			}
 			const auto *inst = change.surface->owner;
 			RTSurfaceData merged;
 			RTSurfaceData *data = change.data;
@@ -2252,34 +2268,51 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				const bool built = _build_merged_mm_blas(mm, mesh_storage->multimesh_get_gpu_buffer(mm), change.surface->surface,
 						mesh_storage->multimesh_get_instances_to_draw(mm), change.surface->surface_index, change.lod,
 						mesh_storage->mesh_surface_get_rt_invalidation_counter(change.surface->surface), compute, dirty_blas_list, dirty_blas_update_list, &merged);
-				if (!built) { RD::get_singleton()->compute_list_end(); ERR_FAIL_V(nullptr); }
+				if (!built) {
+					RD::get_singleton()->compute_list_end();
+					ERR_FAIL_V(nullptr);
+				}
 				data = &merged;
 				range->merged_handle = merged_mm_active_this_frame[merged_mm_active_this_frame.size() - 1];
 			}
-			ChangedRange update; update.first = range->first;
-			update.instances.resize(range->count); update.geometry.resize(range->count);
+			ChangedRange update;
+			update.first = range->first;
+			update.instances.resize(range->count);
+			update.geometry.resize(range->count);
 			const float *mm_data = multimesh && !range->merged ? mesh_storage->multimesh_get_local_data_ptr(mm) : nullptr;
 			const uint32_t stride = mm_data ? mesh_storage->multimesh_get_stride(mm) : 0;
 			const uint32_t offset = mm_data ? mesh_storage->multimesh_get_current_instance_offset(mm) : 0;
 			for (uint32_t i = 0; i < range->count; i++) {
 				Transform3D transform = inst->transform;
-				RT_GeometryData &geometry = update.geometry[i]; geometry = data->geometry;
-				geometry.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset); geometry.layer_mask = inst->layer_mask;
+				RT_GeometryData &geometry = update.geometry[i];
+				geometry = data->geometry;
+				geometry.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
+				geometry.layer_mask = inst->layer_mask;
 				if (mm_data) {
-					const float *d = mm_data + (offset + i) * stride; Transform3D local;
+					const float *d = mm_data + (offset + i) * stride;
+					Transform3D local;
 					for (uint32_t row = 0; row < 3; row++) {
-						for (uint32_t col = 0; col < 3; col++) { local.basis.rows[row][col] = d[row * 4 + col]; }
+						for (uint32_t col = 0; col < 3; col++) {
+							local.basis.rows[row][col] = d[row * 4 + col];
+						}
 						local.origin[row] = d[row * 4 + 3];
 					}
 					transform = transform * local;
 					if (mesh_storage->multimesh_uses_custom_data(mm)) {
-						for (uint32_t channel = 0; channel < 4; channel++) { geometry.instance_custom[channel] = d[stride - 4 + channel]; }
+						for (uint32_t channel = 0; channel < 4; channel++) {
+							geometry.instance_custom[channel] = d[stride - 4 + channel];
+						}
 					}
 				}
-				if (data->is_compressed) { transform = transform * data->aabb_transform; }
+				if (data->is_compressed) {
+					transform = transform * data->aabb_transform;
+				}
 				RD::AccelerationStructureInstance &instance = update.instances[i];
-				instance.id = range->first + i; instance.transform = transform; instance.blas = data->blas;
-				instance.flags = BitField<RD::AccelerationStructureInstanceFlagBits>(range->flags); instance.mask = 0xff;
+				instance.id = range->first + i;
+				instance.transform = transform;
+				instance.blas = data->blas;
+				instance.flags = BitField<RD::AccelerationStructureInstanceFlagBits>(range->flags);
+				instance.mask = 0xff;
 				instance.hit_sbt_range = RD::HitShaderBindingTableRange((1ULL << 32) | uint64_t(range->sbt));
 			}
 			state->cached_primitive_count -= range->primitives * range->count;
@@ -2288,24 +2321,41 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			updates.push_back(std::move(update));
 		}
 		RD::get_singleton()->compute_list_end();
-		for (RID blas : dirty_blas_list) { ERR_FAIL_COND_V(RD::get_singleton()->blas_build(blas) != OK, nullptr); }
-		for (RID blas : dirty_blas_update_list) { ERR_FAIL_COND_V(RD::get_singleton()->blas_update(blas) != OK, nullptr); }
+		for (RID blas : dirty_blas_list) {
+			ERR_FAIL_COND_V(RD::get_singleton()->blas_build(blas) != OK, nullptr);
+		}
+		for (RID blas : dirty_blas_update_list) {
+			ERR_FAIL_COND_V(RD::get_singleton()->blas_update(blas) != OK, nullptr);
+		}
 		LocalVector<RD::AccelerationStructureInstanceRange> ranges;
 		for (ChangedRange &update : updates) {
 			ERR_FAIL_COND_V(RD::get_singleton()->buffer_update(state->geometry_buffer, update.first * sizeof(RT_GeometryData), update.geometry.size() * sizeof(RT_GeometryData), update.geometry.ptr()) != OK, nullptr);
 			ranges.push_back({ update.first, { update.instances.ptr(), update.instances.size() } });
 		}
-		if (ranges.size()) { ERR_FAIL_COND_V(RD::get_singleton()->tlas_update_instances(state->tlas, ranges) != OK, nullptr); }
-		for (const LODChange &change : lod_changes) { state->lod_surfaces[change.selection].lod = change.lod; state->surface_ranges[change.surface].lod = change.lod; }
-		state->cached_surface_keys.clear(); state->cached_merged_handles.clear();
+		if (ranges.size()) {
+			ERR_FAIL_COND_V(RD::get_singleton()->tlas_update_instances(state->tlas, ranges) != OK, nullptr);
+		}
+		for (const LODChange &change : lod_changes) {
+			state->lod_surfaces[change.selection].lod = change.lod;
+			state->surface_ranges[change.surface].lod = change.lod;
+		}
+		state->cached_surface_keys.clear();
+		state->cached_merged_handles.clear();
 		HashSet<RTSurfaceKey, RTSurfaceKeyHasher> active;
 		for (const KeyValue<const void *, RTViewportState::SurfaceRange> &cached : state->surface_ranges) {
 			const auto *surface = static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(cached.key);
 			RID mesh = surface->owner->data->base;
-			if (surface->owner->data->base_type == RSE::INSTANCE_MULTIMESH) { mesh = mesh_storage->multimesh_get_mesh(mesh); }
+			if (surface->owner->data->base_type == RSE::INSTANCE_MULTIMESH) {
+				mesh = mesh_storage->multimesh_get_mesh(mesh);
+			}
 			RTSurfaceKey key{ mesh, surface->surface_index, cached.value.lod };
-			if (!active.has(key)) { active.insert(key); state->cached_surface_keys.push_back(key); }
-			if (cached.value.merged_handle.is_valid()) { state->cached_merged_handles.push_back(cached.value.merged_handle); }
+			if (!active.has(key)) {
+				active.insert(key);
+				state->cached_surface_keys.push_back(key);
+			}
+			if (cached.value.merged_handle.is_valid()) {
+				state->cached_merged_handles.push_back(cached.value.merged_handle);
+			}
 		}
 		state->scene_cached = true;
 		state->cached_pipeline_generation = pipeline_generation;
@@ -2315,7 +2365,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_RT_BLAS_REFITS] += dirty_blas_update_list.size();
 		}
 #endif
-		if (profiling) { print_line(vformat("RTX LOD RANGES: surfaces=%d ranges=%d CPU=%.2f ms", lod_changes.size(), ranges.size(), (OS::get_singleton()->get_ticks_usec() - profile_start) / 1000.0)); }
+		if (profiling) {
+			print_line(vformat("RTX LOD RANGES: surfaces=%d ranges=%d CPU=%.2f ms", lod_changes.size(), ranges.size(), (OS::get_singleton()->get_ticks_usec() - profile_start) / 1000.0));
+		}
 	}
 	if (reuse_scene) {
 		if (!ordered_inputs_match) {
@@ -2814,7 +2866,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				blas_transforms.push_back(final_transform);
 				geometry_data.push_back(surf_data->geometry);
 				geometry_data[geometry_data.size() - 1].instance_uniforms_ofs = pending.instance_uniforms_ofs;
-			geometry_data[geometry_data.size() - 1].layer_mask = pending.layer_mask;
+				geometry_data[geometry_data.size() - 1].layer_mask = pending.layer_mask;
 				if (mesh_storage->multimesh_uses_custom_data(pending.mm_rid)) {
 					for (uint32_t channel = 0; channel < 4; channel++) {
 						geometry_data[geometry_data.size() - 1].instance_custom[channel] = d[mm_stride - 4 + channel];
@@ -2914,7 +2966,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	for (KeyValue<const void *, RTViewportState::SurfaceRange> &cached : state->surface_ranges) {
 		const auto *surface = static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(cached.key);
 		cached.value.lod = _select_surface_lod(surface->owner, surface->surface, p_render_data);
-		if (mesh_storage->mesh_surface_has_lod(surface->surface)) { state->lod_surfaces.push_back({ surface, cached.value.lod }); }
+		if (mesh_storage->mesh_surface_has_lod(surface->surface)) {
+			state->lod_surfaces.push_back({ surface, cached.value.lod });
+		}
 	}
 
 	state->cached_surface_keys.clear();
@@ -3424,12 +3478,18 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 	}
 
 	{
-		RD::Uniform u; u.binding = 33; u.uniform_type = RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE;
-		u.append_id(p_state->decal_tlas); uniforms.push_back(u);
+		RD::Uniform u;
+		u.binding = 33;
+		u.uniform_type = RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE;
+		u.append_id(p_state->decal_tlas);
+		uniforms.push_back(u);
 	}
 	{
-		RD::Uniform u; u.binding = 34; u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		u.append_id(p_state->decal_buffer); uniforms.push_back(u);
+		RD::Uniform u;
+		u.binding = 34;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(p_state->decal_buffer);
+		uniforms.push_back(u);
 	}
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
 	if (texture_streaming_enabled) {
@@ -3570,10 +3630,16 @@ void RenderRaytracing::update_decals(const RenderDataRD *p_render_data, RTViewpo
 	auto *materials = RendererRD::MaterialStorage::get_singleton();
 	auto *shaders = SceneShaderRaytracing::get_singleton();
 	LocalVector<RID> ids;
-	if (p_render_data->rt_decals) for (uint32_t i = 0; i < p_render_data->rt_decals->size(); i++) ids.push_back((*p_render_data->rt_decals)[i]);
+	if (p_render_data->rt_decals) {
+		for (uint32_t i = 0; i < p_render_data->rt_decals->size(); i++) {
+			ids.push_back((*p_render_data->rt_decals)[i]);
+		}
+	}
 	ids.sort();
 	bool same_ids = ids.size() == p_state->cached_decals.size();
-	for (uint32_t i = 0; same_ids && i < ids.size(); i++) same_ids = ids[i] == p_state->cached_decals[i];
+	for (uint32_t i = 0; same_ids && i < ids.size(); i++) {
+		same_ids = ids[i] == p_state->cached_decals[i];
+	}
 	const uint64_t revision = textures->get_rt_decal_revision();
 	const uint64_t material_revision = materials->get_rt_material_revision();
 	const uint64_t generation = shaders->get_pipeline_generation(p_rt_flags);
@@ -3583,55 +3649,139 @@ void RenderRaytracing::update_decals(const RenderDataRD *p_render_data, RTViewpo
 			feedback_indices_unchanged = false;
 		}
 	}
-	if (feedback_indices_unchanged && same_ids && revision == p_state->cached_decal_revision && material_revision == p_state->cached_decal_material_revision && generation == p_state->cached_decal_pipeline_generation && (!p_state->decal_distance_fade || p_state->cached_decal_camera == p_render_data->scene_data->cam_transform.origin)) return;
+	if (feedback_indices_unchanged && same_ids && revision == p_state->cached_decal_revision && material_revision == p_state->cached_decal_material_revision && generation == p_state->cached_decal_pipeline_generation && (!p_state->decal_distance_fade || p_state->cached_decal_camera == p_render_data->scene_data->cam_transform.origin)) {
+		return;
+	}
 	p_state->cached_decal_feedback_indices.clear();
-	struct Projector { RID rid; RendererRD::TextureStorage::RTDecal data; };
+	struct Projector {
+		RID rid;
+		RendererRD::TextureStorage::RTDecal data;
+	};
 	LocalVector<Projector> projectors;
-	for (RID id : ids) { Projector p; p.rid = id; if (textures->decal_instance_get_rt_data(id, p.data)) projectors.push_back(p); }
-	struct Order { bool operator()(const Projector &a, const Projector &b) const { return a.data.sorting_offset == b.data.sorting_offset ? a.rid < b.rid : a.data.sorting_offset < b.data.sorting_offset; } };
+	for (RID id : ids) {
+		Projector p;
+		p.rid = id;
+		if (textures->decal_instance_get_rt_data(id, p.data)) {
+			projectors.push_back(p);
+		}
+	}
+	struct Order {
+		bool operator()(const Projector &a, const Projector &b) const { return a.data.sorting_offset == b.data.sorting_offset ? a.rid < b.rid : a.data.sorting_offset < b.data.sorting_offset; }
+	};
 	projectors.sort_custom<Order>();
 	if (decal_unit_blas.is_null()) {
-		Vector<uint8_t> bytes; bytes.resize(24); const float bounds[6] = { -.5f, -.5f, -.5f, .5f, .5f, .5f }; memcpy(bytes.ptrw(), bounds, 24);
+		Vector<uint8_t> bytes;
+		bytes.resize(24);
+		const float bounds[6] = { -.5f, -.5f, -.5f, .5f, .5f, .5f };
+		memcpy(bytes.ptrw(), bounds, 24);
 		decal_unit_buffer = rd->storage_buffer_create(24, bytes, 0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
-		RD::AccelerationStructureGeometry g; g.type = RD::AccelerationStructureGeometry::TYPE_AABBS;
-		g.geometry.aabbs.buffer = decal_unit_buffer; g.geometry.aabbs.count = 1; g.geometry.aabbs.stride = 24;
-		decal_unit_blas = rd->blas_create({ &g, 1 }, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT); rd->blas_build(decal_unit_blas);
+		RD::AccelerationStructureGeometry g;
+		g.type = RD::AccelerationStructureGeometry::TYPE_AABBS;
+		g.geometry.aabbs.buffer = decal_unit_buffer;
+		g.geometry.aabbs.count = 1;
+		g.geometry.aabbs.stride = 24;
+		decal_unit_blas = rd->blas_create({ &g, 1 }, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+		rd->blas_build(decal_unit_blas);
 	}
 	p_state->decal_distance_fade = false;
 	p_state->cached_decal_camera = p_render_data->scene_data->cam_transform.origin;
-	LocalVector<RT_DecalData> table; table.resize(projectors.size());
-	LocalVector<RD::AccelerationStructureInstance> instances; instances.resize(projectors.size());
-	auto store_matrix = [](const Transform3D &t, float *dst) { for (int col = 0; col < 4; col++) { Vector3 v = col == 3 ? t.origin : t.basis.get_column(col); for (int row = 0; row < 3; row++) dst[col * 4 + row] = v[row]; dst[col * 4 + 3] = col == 3 ? 1.f : 0.f; } };
-	Vector<uint8_t> transforms; transforms.resize(projectors.size() * sizeof(Transform3D));
+	LocalVector<RT_DecalData> table;
+	table.resize(projectors.size());
+	LocalVector<RD::AccelerationStructureInstance> instances;
+	instances.resize(projectors.size());
+	auto store_matrix = [](const Transform3D &t, float *dst) { for (int col = 0; col < 4; col++) { Vector3 v = col == 3 ? t.origin : t.basis.get_column(col); for (int row = 0; row < 3; row++){ dst[col * 4 + row] = v[row];
+} dst[col * 4 + 3] = col == 3 ? 1.f : 0.f; } };
+	Vector<uint8_t> transforms;
+	transforms.resize(projectors.size() * sizeof(Transform3D));
 	for (uint32_t i = 0; i < projectors.size(); i++) {
-		const auto &p = projectors[i].data; RT_DecalData &d = table[i]; d = {};
-		Transform3D model = p.transform; model.basis.scale_local(p.size);
-		store_matrix(model, d.model); store_matrix(model.affine_inverse(), d.inverse_model);
+		const auto &p = projectors[i].data;
+		RT_DecalData &d = table[i];
+		d = {};
+		Transform3D model = p.transform;
+		model.basis.scale_local(p.size);
+		store_matrix(model, d.model);
+		store_matrix(model.affine_inverse(), d.inverse_model);
 		memcpy(transforms.ptrw() + i * sizeof(Transform3D), &model, sizeof(model));
-		for (int c = 0; c < 4; c++) { d.instance_custom[c] = p.instance_custom[c]; d.modulate[c] = p.modulate[c]; }
-		d.fades[0] = p.upper_fade; d.fades[1] = p.lower_fade; d.fades[2] = p.normal_fade; d.fades[3] = 1.f;
-		d.parameters[0] = p.albedo_mix; d.parameters[1] = p.emission_energy;
-		if (p.distance_fade) { p_state->decal_distance_fade = true; const float distance = p.transform.origin.distance_to(p_render_data->scene_data->cam_transform.origin); d.fades[3] = 1.f - CLAMP((distance - p.distance_fade_begin) / p.distance_fade_length, 0.f, 1.f); }
-		d.cull_mask = p.cull_mask; d.callable_index = UINT32_MAX;
-		for (int c = 0; c < 4; c++) { d.textures[c] = UINT32_MAX; if (p.textures[c].is_valid()) { RID tex = textures->texture_get_rd_texture(p.textures[c], c == RSE::DECAL_TEXTURE_ALBEDO || c == RSE::DECAL_TEXTURE_EMISSION); if (tex.is_valid()) d.textures[c] = bindless_block->add_texture(tex); } }
+		for (int c = 0; c < 4; c++) {
+			d.instance_custom[c] = p.instance_custom[c];
+			d.modulate[c] = p.modulate[c];
+		}
+		d.fades[0] = p.upper_fade;
+		d.fades[1] = p.lower_fade;
+		d.fades[2] = p.normal_fade;
+		d.fades[3] = 1.f;
+		d.parameters[0] = p.albedo_mix;
+		d.parameters[1] = p.emission_energy;
+		if (p.distance_fade) {
+			p_state->decal_distance_fade = true;
+			const float distance = p.transform.origin.distance_to(p_render_data->scene_data->cam_transform.origin);
+			d.fades[3] = 1.f - CLAMP((distance - p.distance_fade_begin) / p.distance_fade_length, 0.f, 1.f);
+		}
+		d.cull_mask = p.cull_mask;
+		d.callable_index = UINT32_MAX;
+		for (int c = 0; c < 4; c++) {
+			d.textures[c] = UINT32_MAX;
+			if (p.textures[c].is_valid()) {
+				RID tex = textures->texture_get_rd_texture(p.textures[c], c == RSE::DECAL_TEXTURE_ALBEDO || c == RSE::DECAL_TEXTURE_EMISSION);
+				if (tex.is_valid()) {
+					d.textures[c] = bindless_block->add_texture(tex);
+				}
+			}
+		}
 		if (p.material.is_valid()) {
 			RTMaterialData *m = process_material(p.material, materials->material_get_rt_invalidation_counter(p.material));
 			d.material_feedback_index = m->data.material_feedback_index;
 			p_state->cached_decal_feedback_indices.insert(p.material, d.material_feedback_index);
 			const auto *entry = shaders->get_custom_shader_entry(m->rt_sbt_offset);
 			ERR_FAIL_COND_MSG(!entry || !entry->is_decal, "Native Decal material requires render_mode decal.");
-			if (shaders->is_hg_ready_in_bundle(m->rt_sbt_offset, p_rt_flags)) { d.callable_index = entry->callable_index; d.uniform_address = m->data.uniform_address; }
+			if (shaders->is_hg_ready_in_bundle(m->rt_sbt_offset, p_rt_flags)) {
+				d.callable_index = entry->callable_index;
+				d.uniform_address = m->data.uniform_address;
+			}
 		}
-		auto &instance = instances[i]; instance.id = i; instance.transform = model; instance.blas = decal_unit_blas; instance.mask = 0xff; instance.hit_sbt_range = RD::HitShaderBindingTableRange((1ULL << 32));
+		auto &instance = instances[i];
+		instance.id = i;
+		instance.transform = model;
+		instance.blas = decal_unit_blas;
+		instance.mask = 0xff;
+		instance.hit_sbt_range = RD::HitShaderBindingTableRange((1ULL << 32));
 	}
 	const uint32_t needed = MAX(1u, instances.size());
 	bool rebuild = !same_ids || transforms.size() != p_state->cached_decal_transforms.size() || (transforms.size() && memcmp(transforms.ptr(), p_state->cached_decal_transforms.ptr(), transforms.size()) != 0);
-	if (p_state->decal_tlas_capacity < needed) { if (p_state->decal_tlas.is_valid()) rd->free_rid(p_state->decal_tlas); p_state->decal_tlas_capacity = needed * 2; p_state->decal_tlas = rd->tlas_create(p_state->decal_tlas_capacity, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT); rebuild = true; }
-	if (rebuild) rd->tlas_build(p_state->decal_tlas, instances);
+	if (p_state->decal_tlas_capacity < needed) {
+		if (p_state->decal_tlas.is_valid()) {
+			rd->free_rid(p_state->decal_tlas);
+		}
+		p_state->decal_tlas_capacity = needed * 2;
+		p_state->decal_tlas = rd->tlas_create(p_state->decal_tlas_capacity, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+		rebuild = true;
+	}
+	if (rebuild) {
+		rd->tlas_build(p_state->decal_tlas, instances);
+	}
 	const uint32_t byte_count = 16 + table.size() * sizeof(RT_DecalData);
-	Vector<uint8_t> bytes; bytes.resize(byte_count); memset(bytes.ptrw(), 0, byte_count); const uint32_t count = table.size(); memcpy(bytes.ptrw(), &count, 4); if (count) memcpy(bytes.ptrw() + 16, table.ptr(), table.size() * sizeof(RT_DecalData));
-	if (p_state->decal_buffer_capacity < byte_count) { if (p_state->decal_buffer.is_valid()) rd->free_rid(p_state->decal_buffer); p_state->decal_buffer_capacity = byte_count * 2; p_state->decal_buffer = rd->storage_buffer_create(p_state->decal_buffer_capacity); }
+	Vector<uint8_t> bytes;
+	bytes.resize(byte_count);
+	memset(bytes.ptrw(), 0, byte_count);
+	const uint32_t count = table.size();
+	memcpy(bytes.ptrw(), &count, 4);
+	if (count) {
+		memcpy(bytes.ptrw() + 16, table.ptr(), table.size() * sizeof(RT_DecalData));
+	}
+	if (p_state->decal_buffer_capacity < byte_count) {
+		if (p_state->decal_buffer.is_valid()) {
+			rd->free_rid(p_state->decal_buffer);
+		}
+		p_state->decal_buffer_capacity = byte_count * 2;
+		p_state->decal_buffer = rd->storage_buffer_create(p_state->decal_buffer_capacity);
+	}
 	rd->buffer_update(p_state->decal_buffer, 0, byte_count, bytes.ptr());
-	p_state->cached_decals = ids; p_state->cached_decal_transforms.resize(transforms.size()); if (transforms.size()) memcpy(p_state->cached_decal_transforms.ptr(), transforms.ptr(), transforms.size());
-	p_state->cached_decal_revision = revision; p_state->cached_decal_material_revision = material_revision; p_state->cached_decal_pipeline_generation = generation;
+	p_state->cached_decals = ids;
+	p_state->cached_decal_transforms.resize(transforms.size());
+	if (transforms.size()) {
+		memcpy(p_state->cached_decal_transforms.ptr(), transforms.ptr(), transforms.size());
+	}
+	p_state->cached_decal_revision = revision;
+	p_state->cached_decal_material_revision = material_revision;
+	p_state->cached_decal_pipeline_generation = generation;
 }

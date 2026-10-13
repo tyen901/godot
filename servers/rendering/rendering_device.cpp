@@ -588,7 +588,9 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 	for (uint32_t i = 0; i < p_instances.size(); i++) {
 		const AccelerationStructureInstance &rd_instance = p_instances[i];
 		tlas->instance_blas[i] = rd_instance.blas;
-		if (rd_instance.blas.is_valid()) { tlas->blas_reference_counts[rd_instance.blas]++; }
+		if (rd_instance.blas.is_valid()) {
+			tlas->blas_reference_counts[rd_instance.blas]++;
+		}
 
 		RDD::AccelerationStructureInstance rdd_instance;
 		rdd_instance.transform = rd_instance.transform;
@@ -625,7 +627,9 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 				BUFFER_CREATION_DEVICE_ADDRESS_BIT | BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
 	}
 	ERR_FAIL_COND_V(tlas->instance_buffer.is_null(), ERR_CANT_CREATE);
-	if (shadow_buffer.size()) { ERR_FAIL_COND_V(buffer_update(tlas->instance_buffer, 0, byte_count, shadow_buffer.ptr()) != OK, ERR_CANT_CREATE); }
+	if (shadow_buffer.size()) {
+		ERR_FAIL_COND_V(buffer_update(tlas->instance_buffer, 0, byte_count, shadow_buffer.ptr()) != OK, ERR_CANT_CREATE);
+	}
 	Buffer *input = storage_buffer_owner.get_or_null(tlas->instance_buffer);
 	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, input->driver_id, 0, p_instances.size(), tlas->draw_tracker, draw_trackers, input->draw_tracker);
 
@@ -674,17 +678,24 @@ Error RenderingDevice::tlas_update_instances(RID p_tlas, Span<AccelerationStruct
 				old = instance.blas;
 			}
 			RDD::AccelerationStructureInstance native;
-			native.transform = instance.transform; native.id = instance.id; native.mask = instance.mask;
-			native.flags = instance.flags; native.hit_sbt_offset = _decode_hit_sbt_range_offset(instance.hit_sbt_range);
+			native.transform = instance.transform;
+			native.id = instance.id;
+			native.mask = instance.mask;
+			native.flags = instance.flags;
+			native.hit_sbt_offset = _decode_hit_sbt_range_offset(instance.hit_sbt_range);
 			native.blas = acceleration_structure_owner.get_or_null(instance.blas)->driver_id;
 			driver->acceleration_structure_instance_write(packed.ptr() + i * instance_size, native);
 		}
-		if (packed.size()) { ERR_FAIL_COND_V(buffer_update(tlas->instance_buffer, range.first * instance_size, packed.size(), packed.ptr()) != OK, ERR_CANT_CREATE); }
+		if (packed.size()) {
+			ERR_FAIL_COND_V(buffer_update(tlas->instance_buffer, range.first * instance_size, packed.size(), packed.ptr()) != OK, ERR_CANT_CREATE);
+		}
 	}
 	LocalVector<RDG::ResourceTracker *> trackers;
 	for (RID id : tlas->acceleration_structure_dependencies) {
 		AccelerationStructure *blas = acceleration_structure_owner.get_or_null(id);
-		if (blas->draw_tracker) { trackers.push_back(blas->draw_tracker); }
+		if (blas->draw_tracker) {
+			trackers.push_back(blas->draw_tracker);
+		}
 	}
 	Buffer *input = storage_buffer_owner.get_or_null(tlas->instance_buffer);
 	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, input->driver_id, 0, tlas->instance_blas.size(), tlas->draw_tracker, trackers, input->draw_tracker);
@@ -7949,7 +7960,9 @@ void RenderingDevice::_free_internal(RID p_id) {
 			_blas_remove_tlas_dependencies(acceleration_structure, p_id);
 		} else if (acceleration_structure->type == ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
 			_tlas_remove_blas_dependencies(acceleration_structure, p_id);
-			if (acceleration_structure->instance_buffer.is_valid()) { free_rid(acceleration_structure->instance_buffer); }
+			if (acceleration_structure->instance_buffer.is_valid()) {
+				free_rid(acceleration_structure->instance_buffer);
+			}
 		}
 		RDG::resource_tracker_free(acceleration_structure->draw_tracker);
 		frames[frame].acceleration_structures_to_dispose_of.push_back(*acceleration_structure);
@@ -8297,7 +8310,6 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 			buffer_memory.sub(driver->buffer_get_allocation_size(acceleration_structure.scratch_buffer));
 			driver->buffer_free(acceleration_structure.scratch_buffer);
 		}
-
 
 		frames[p_frame].acceleration_structures_to_dispose_of.pop_front();
 	}

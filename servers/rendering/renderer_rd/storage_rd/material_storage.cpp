@@ -2922,7 +2922,6 @@ void MaterialStorage::register_raytracing_material(RID p_material) {
 	rt->register_custom_shader(material->shader_id, p_material);
 }
 
-
 void MaterialStorage::queue_raytracing_material(RID p_material) {
 	if (p_material.is_null()) {
 		return;

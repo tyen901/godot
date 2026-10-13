@@ -52,7 +52,9 @@ struct GeometryData {
 	uint instance_uniforms_ofs;
 	vec4 instance_custom;
 	uint layer_mask;
-	uint decal_pad0; uint decal_pad1; uint decal_pad2;
+	uint decal_pad0;
+	uint decal_pad1;
+	uint decal_pad2;
 };
 
 void get_aabb_compression_xforms(GeometryData geom, out mat4 aabb_xform, out mat4 inv_aabb_xform) {

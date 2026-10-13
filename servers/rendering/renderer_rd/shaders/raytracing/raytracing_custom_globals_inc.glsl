@@ -43,14 +43,28 @@ vec4 rt_custom_vertex_attribute(GeometryData geom, uint index, uint channel) {
 	uint format = descriptor >> 28u;
 	Uint32Buffer data = Uint32Buffer(geom.attribute_address);
 	uint first = data.v[offset];
-	if (format == 0u) return unpackUnorm4x8(first);
-	if (format == 1u) return unpackSnorm4x8(first);
-	if (format == 2u) return vec4(unpackHalf2x16(first), 0.0, 1.0);
-	if (format == 3u) return vec4(unpackHalf2x16(first), unpackHalf2x16(data.v[offset + 1u]));
+	if (format == 0u) {
+		return unpackUnorm4x8(first);
+	}
+	if (format == 1u) {
+		return unpackSnorm4x8(first);
+	}
+	if (format == 2u) {
+		return vec4(unpackHalf2x16(first), 0.0, 1.0);
+	}
+	if (format == 3u) {
+		return vec4(unpackHalf2x16(first), unpackHalf2x16(data.v[offset + 1u]));
+	}
 	vec4 result = vec4(uintBitsToFloat(first), 0.0, 0.0, 1.0);
-	if (format >= 5u) result.y = uintBitsToFloat(data.v[offset + 1u]);
-	if (format >= 6u) result.z = uintBitsToFloat(data.v[offset + 2u]);
-	if (format == 7u) result.w = uintBitsToFloat(data.v[offset + 3u]);
+	if (format >= 5u) {
+		result.y = uintBitsToFloat(data.v[offset + 1u]);
+	}
+	if (format >= 6u) {
+		result.z = uintBitsToFloat(data.v[offset + 2u]);
+	}
+	if (format == 7u) {
+		result.w = uintBitsToFloat(data.v[offset + 3u]);
+	}
 	return result;
 }
 
@@ -58,9 +72,7 @@ vec4 rt_custom_attribute(GeometryData geom, uint channel) {
 	uint i0, i1, i2;
 	get_triangle_indices(geom, i0, i1, i2);
 	vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
-	return rt_custom_vertex_attribute(geom, i0, channel) * bary.x
-			+ rt_custom_vertex_attribute(geom, i1, channel) * bary.y
-			+ rt_custom_vertex_attribute(geom, i2, channel) * bary.z;
+	return rt_custom_vertex_attribute(geom, i0, channel) * bary.x + rt_custom_vertex_attribute(geom, i1, channel) * bary.y + rt_custom_vertex_attribute(geom, i2, channel) * bary.z;
 }
 
 vec4 color_interp = vec4(1.0);

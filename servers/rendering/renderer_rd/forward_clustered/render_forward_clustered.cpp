@@ -5115,7 +5115,9 @@ RenderGeometryInstance *RenderForwardClustered::geometry_instance_create(RID p_b
 }
 
 void RenderForwardClustered::GeometryInstanceForwardClustered::set_layer_mask(uint32_t p_layer_mask) {
-	if (layer_mask != p_layer_mask) rt_revision = ++RenderForwardClustered::get_singleton()->rt_instance_revision;
+	if (layer_mask != p_layer_mask) {
+		rt_revision = ++RenderForwardClustered::get_singleton()->rt_instance_revision;
+	}
 	RenderGeometryInstanceBase::set_layer_mask(p_layer_mask);
 }
 

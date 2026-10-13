@@ -191,7 +191,7 @@ public:
 
 private:
 	static MaterialStorage *singleton;
-	SafeNumeric<uint64_t> rt_material_revision{1};
+	SafeNumeric<uint64_t> rt_material_revision{ 1 };
 	Mutex rt_material_candidates_mutex;
 	HashSet<RID> rt_material_candidates;
 	HashMap<RID, uint32_t> rt_geometry_materials;

@@ -368,7 +368,10 @@ struct RTViewportState {
 	// animated material UBOs are updated independently of these static tables.
 	LocalVector<RTSceneInput> cached_scene_inputs;
 	HashMap<uint64_t, uint64_t> cached_input_revisions;
-	struct LODSurface { const void *surface; uint32_t lod; };
+	struct LODSurface {
+		const void *surface;
+		uint32_t lod;
+	};
 	LocalVector<LODSurface> lod_surfaces;
 	struct SurfaceRange {
 		uint32_t first = 0, count = 0, flags = 0, sbt = 0, primitives = 0;

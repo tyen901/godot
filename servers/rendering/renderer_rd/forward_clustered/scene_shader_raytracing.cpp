@@ -29,20 +29,20 @@
 /**************************************************************************/
 
 #include "scene_shader_raytracing.h"
-#include "core/io/resource_loader.h"
 
 #include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/marshalls.h"
+#include "core/io/resource_loader.h"
 #include "core/math/math_defs.h"
 #include "core/os/os.h"
 #include "core/version.h"
-#include "servers/rendering/shader_include_db.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+#include "servers/rendering/shader_include_db.h"
 #include "servers/rendering/storage/environment_storage.h"
 
 #include "modules/modules_enabled.gen.h"
@@ -623,7 +623,9 @@ uint32_t SceneShaderRaytracing::_register_slot(uint32_t /*p_shader_id*/, RID p_m
 		return 0;
 	}
 
-	if (entry.is_decal) { entry.callable_index = decal_callable_count++; }
+	if (entry.is_decal) {
+		entry.callable_index = decal_callable_count++;
+	}
 	HitGroupSlot slot;
 	slot.source_hash = hash;
 	slot.state = HGState::Ready;
@@ -1118,7 +1120,9 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 
 		{
 			String s = si.is_decal ? ctx.callable_template : ctx.ch_template;
-			if (si.is_decal && entry.decal_blend_mul) s = s.insert(s.find("\n", s.find("#version")) + 1, "#define RT_DECAL_BLEND_MUL\n");
+			if (si.is_decal && entry.decal_blend_mul) {
+				s = s.insert(s.find("\n", s.find("#version")) + 1, "#define RT_DECAL_BLEND_MUL\n");
+			}
 			s = s.replace("/* RT_CUSTOM_FRAGMENT_GLOBALS */", entry.fragment_globals);
 			s = s.replace("/* RT_CUSTOM_FRAGMENT_CODE */", fragment_code);
 			s = s.replace("/* RT_CUSTOM_UNIFORM_MEMBERS */", uniform_members);
@@ -1352,7 +1356,9 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		}
 	};
 	LocalVector<OrderedSlot> order;
-	for (uint32_t i = 1; i < n; i++) { order.push_back({ p_task->slots[i].source_hash, i }); }
+	for (uint32_t i = 1; i < n; i++) {
+		order.push_back({ p_task->slots[i].source_hash, i });
+	}
 	order.sort();
 	LocalVector<RD::HitGroup> hit_groups;
 	LocalVector<RD::PipelineShader> callables;
@@ -1365,9 +1371,17 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		const uint32_t i = order[physical - 1].logical;
 		p_task->logical_slot_to_physical_hg[i] = physical;
 		if (p_task->slots[i].is_decal) {
-			if (!p_task->new_ready_mask[i]) { cleanup_created(); p_task->failed = true; p_task->error = "Decal callable compilation failed"; finish(); return; }
+			if (!p_task->new_ready_mask[i]) {
+				cleanup_created();
+				p_task->failed = true;
+				p_task->error = "Decal callable compilation failed";
+				finish();
+				return;
+			}
 			const uint32_t logical_callable = p_task->slots[i].callable_index;
-			if (logical_callable >= callable_indices.size()) { callable_indices.resize(logical_callable + 1); }
+			if (logical_callable >= callable_indices.size()) {
+				callable_indices.resize(logical_callable + 1);
+			}
 			callable_indices[logical_callable] = callables.size();
 			callables.push_back({ p_task->new_per_hg_shaders[i], p_task->spec_constants });
 			hit_groups[physical] = empty_hg;
@@ -1381,7 +1395,9 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		RD::HitGroup hg;
 		hg.closest_hit_shader = custom_ps;
 		hg.any_hit_shader = p_task->slots[i].uses_alpha_clip ? custom_ps : base_ps;
-		if (p_task->slots[i].is_procedural) { hg.intersection_shader = custom_ps; }
+		if (p_task->slots[i].is_procedural) {
+			hg.intersection_shader = custom_ps;
+		}
 		hit_groups[physical] = hg;
 	}
 	hit_groups[n] = empty_hg;

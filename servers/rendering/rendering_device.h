@@ -1640,7 +1640,7 @@ private:
 			RDD::BufferID sbt_buffer;
 			uint32_t raygen_shader_count = 0;
 			uint32_t miss_shader_count = 0;
-		uint32_t callable_shader_count = 0;
+			uint32_t callable_shader_count = 0;
 			uint32_t trace_count = 0;
 		} state;
 

@@ -69,7 +69,7 @@ public:
 
 private:
 	static MeshStorage *singleton;
-	SafeNumeric<uint64_t> rt_geometry_revision{1};
+	SafeNumeric<uint64_t> rt_geometry_revision{ 1 };
 
 	RID default_rd_storage_buffer;
 
@@ -80,7 +80,7 @@ private:
 	struct MeshInstance;
 
 	struct Mesh {
-		SafeNumeric<uint64_t> rt_revision{1};
+		SafeNumeric<uint64_t> rt_revision{ 1 };
 		struct Surface {
 			RSE::PrimitiveType primitive = RSE::PRIMITIVE_POINTS;
 			uint64_t format = 0;
@@ -235,7 +235,7 @@ private:
 	/* MultiMesh */
 
 	struct MultiMesh {
-		SafeNumeric<uint64_t> rt_revision{1};
+		SafeNumeric<uint64_t> rt_revision{ 1 };
 		RID mesh;
 		int instances = 0;
 		RSE::MultimeshTransformFormat xform_format = RSE::MULTIMESH_TRANSFORM_3D;

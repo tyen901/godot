@@ -401,7 +401,7 @@ public:
 		CustomShaderEntry entry;
 	};
 
-	SafeNumeric<uint64_t> shader_registry_revision{0};
+	SafeNumeric<uint64_t> shader_registry_revision{ 0 };
 	LocalVector<HitGroupSlot> hit_group_slots;
 	uint32_t decal_callable_count = 0;
 	HashMap<SourceHash128, uint32_t, SourceHash128Hasher> source_hash_to_slot;

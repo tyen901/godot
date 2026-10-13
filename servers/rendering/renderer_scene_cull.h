@@ -1071,6 +1071,7 @@ public:
 	virtual Variant instance_geometry_get_shader_parameter_default_value(RID p_instance, const StringName &p_parameter) const;
 
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation);
+	virtual Ref<RenderingPipelinePreparation> geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) override;
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 
 	_FORCE_INLINE_ void _update_instance(Instance *p_instance) const;

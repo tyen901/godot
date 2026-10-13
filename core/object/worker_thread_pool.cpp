@@ -401,6 +401,14 @@ bool WorkerThreadPool::is_task_completed(TaskID p_task_id) const {
 }
 
 Error WorkerThreadPool::wait_for_task_completion(TaskID p_task_id) {
+	return _wait_for_task_completion(p_task_id, true);
+}
+
+Error WorkerThreadPool::wait_for_task_completion_without_reclaim(TaskID p_task_id) {
+	return _wait_for_task_completion(p_task_id, false);
+}
+
+Error WorkerThreadPool::_wait_for_task_completion(TaskID p_task_id, bool p_reclaim) {
 	task_mutex.lock();
 	Task **taskp = tasks.getptr(p_task_id);
 	if (!taskp) {
@@ -410,7 +418,8 @@ Error WorkerThreadPool::wait_for_task_completion(TaskID p_task_id) {
 	Task *task = *taskp;
 
 	if (task->completed) {
-		if (task->waiting_pool == 0 && task->waiting_user == 0) {
+		task->reclaim_requested |= p_reclaim;
+		if (task->reclaim_requested && task->waiting_pool == 0 && task->waiting_user == 0) {
 			tasks.erase(p_task_id);
 			task_allocator.free(task);
 		}
@@ -435,6 +444,7 @@ Error WorkerThreadPool::wait_for_task_completion(TaskID p_task_id) {
 		return ERR_BUSY;
 	}
 
+	task->reclaim_requested |= p_reclaim;
 	if (caller_pool_thread) {
 		task->waiting_pool++;
 	} else {
@@ -446,7 +456,7 @@ Error WorkerThreadPool::wait_for_task_completion(TaskID p_task_id) {
 		_wait_collaboratively(caller_pool_thread, task);
 		task_mutex.lock();
 		task->waiting_pool--;
-		if (task->waiting_pool == 0 && task->waiting_user == 0) {
+		if (task->reclaim_requested && task->waiting_pool == 0 && task->waiting_user == 0) {
 			tasks.erase(p_task_id);
 			task_allocator.free(task);
 		}
@@ -455,7 +465,7 @@ Error WorkerThreadPool::wait_for_task_completion(TaskID p_task_id) {
 		task->done_semaphore.wait();
 		task_mutex.lock();
 		task->waiting_user--;
-		if (task->waiting_pool == 0 && task->waiting_user == 0) {
+		if (task->reclaim_requested && task->waiting_pool == 0 && task->waiting_user == 0) {
 			tasks.erase(p_task_id);
 			task_allocator.free(task);
 		}

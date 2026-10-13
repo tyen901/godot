@@ -2362,6 +2362,7 @@ void RenderingServer::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("mesh_create_from_surfaces", "surfaces", "blend_shape_count"), &RenderingServer::_mesh_create_from_surfaces, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("mesh_create"), &RenderingServer::mesh_create);
+	ClassDB::bind_method(D_METHOD("geometry_prepare_pipelines", "base", "material_override", "shadow_casting", "use_skeleton"), &RenderingServer::geometry_prepare_pipelines, DEFVAL(Ref<Resource>()), DEFVAL(RSE::SHADOW_CASTING_SETTING_ON), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("mesh_surface_get_format_offset", "format", "vertex_count", "array_index"), &RenderingServer::mesh_surface_get_format_offset);
 	ClassDB::bind_method(D_METHOD("mesh_surface_get_format_vertex_stride", "format", "vertex_count"), &RenderingServer::mesh_surface_get_format_vertex_stride);
 	ClassDB::bind_method(D_METHOD("mesh_surface_get_format_normal_tangent_stride", "format", "vertex_count"), &RenderingServer::mesh_surface_get_format_normal_tangent_stride);

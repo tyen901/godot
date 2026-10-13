@@ -2170,7 +2170,18 @@ void MeshStorage::_multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_
 	if (multimesh->data_cache.size()) {
 		float *cache_data = multimesh->data_cache.ptrw();
 		memcpy(cache_data + (multimesh->motion_vectors_current_offset * multimesh->stride_cache), p_buffer.ptr(), p_buffer.size() * sizeof(float));
-		_multimesh_mark_all_dirty(multimesh, true, true); //update AABB
+		if (multimesh->motion_vectors_enabled) {
+			_multimesh_mark_all_dirty(multimesh, true, true);
+		} else {
+			// The complete GPU buffer and CPU cache already contain the new data.
+			// Earlier per-instance edits are superseded; only native bounds remain dirty.
+			uint32_t region_count = Math::division_round_up(multimesh->instances, MULTIMESH_DIRTY_REGION_SIZE);
+			memset(multimesh->data_cache_dirty_regions, 0, region_count * sizeof(bool));
+			memset(multimesh->previous_data_cache_dirty_regions, 0, region_count * sizeof(bool));
+			multimesh->data_cache_dirty_region_count = 0;
+			multimesh->previous_data_cache_dirty_region_count = 0;
+			_multimesh_mark_all_dirty(multimesh, false, true);
+		}
 	} else if (multimesh->mesh.is_valid()) {
 		//if we have a mesh set, we need to re-generate the AABB from the new data
 		const float *data = p_buffer.ptr();

@@ -86,6 +86,7 @@ private:
 		SelfList<Task> task_elem;
 		uint32_t waiting_pool = 0;
 		uint32_t waiting_user = 0;
+		bool reclaim_requested = false;
 		bool low_priority = false;
 		BaseTemplateUserdata *template_userdata = nullptr;
 		int pool_thread_index = -1;
@@ -218,6 +219,7 @@ private:
 	};
 
 	void _wait_collaboratively(ThreadData *p_caller_pool_thread, Task *p_task);
+	Error _wait_for_task_completion(TaskID p_task_id, bool p_reclaim);
 
 	void _switch_runlevel(Runlevel p_runlevel);
 	bool _handle_runlevel(ThreadData *p_thread_data, MutexLock<BinaryMutex> &p_lock);
@@ -248,6 +250,9 @@ public:
 
 	bool is_task_completed(TaskID p_task_id) const;
 	Error wait_for_task_completion(TaskID p_task_id);
+	// Native owners can retain a completion record for repeated/concurrent waits.
+	// They must reclaim it with wait_for_task_completion after all users join.
+	Error wait_for_task_completion_without_reclaim(TaskID p_task_id);
 
 	void yield();
 	void notify_yield_over(TaskID p_task_id);

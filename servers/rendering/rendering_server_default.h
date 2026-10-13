@@ -83,6 +83,7 @@ class RenderingServerDefault : public RenderingServer {
 	WorkerThreadPool::TaskID server_task_id = WorkerThreadPool::INVALID_TASK_ID;
 	bool exit = false;
 	bool create_thread = false;
+	bool pipeline_preparation_stopping = false;
 
 	void _assign_mt_ids(WorkerThreadPool::TaskID p_pump_task_id);
 	void _thread_exit();
@@ -96,6 +97,7 @@ class RenderingServerDefault : public RenderingServer {
 	void _free(RID p_rid);
 
 	void _call_on_render_thread(const Callable &p_callable);
+	Ref<RenderingPipelinePreparation> _geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton);
 
 public:
 	//if editor is redrawing when it shouldn't, enable this and put a breakpoint in _changes_changed()
@@ -362,6 +364,8 @@ public:
 
 #define ServerName RendererMeshStorage
 #define server_name RSG::mesh_storage
+
+	virtual Error geometry_prepare_pipelines(const Ref<Resource> &p_base, const Ref<Resource> &p_material_override = Ref<Resource>(), RSE::ShadowCastingSetting p_shadow_casting = RSE::SHADOW_CASTING_SETTING_ON, bool p_use_skeleton = false) override;
 
 	virtual RID mesh_create_from_surfaces(const Vector<RenderingServerTypes::SurfaceData> &p_surfaces, int p_blend_shape_count = 0) override {
 		RID mesh = RSG::mesh_storage->mesh_allocate();

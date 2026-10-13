@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/object/ref_counted.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/mutex.h"
 #include "core/templates/hash_map.h"
@@ -54,7 +55,12 @@ private:
 	LocalVector<Pair<uint32_t, RID>> compiled_queue;
 	Mutex compiled_queue_mutex;
 	RBSet<uint32_t> compilation_set;
-	HashMap<uint32_t, WorkerThreadPool::TaskID> compilation_tasks;
+	struct CompilationTask : public RefCounted {
+		WorkerThreadPool::TaskID id = WorkerThreadPool::INVALID_TASK_ID;
+
+		bool successful = false;
+	};
+	HashMap<uint32_t, Ref<CompilationTask>> compilation_tasks;
 	Mutex local_mutex;
 
 	bool _add_new_pipelines_to_map() {
@@ -71,32 +77,40 @@ private:
 			compiled_queue.clear();
 		}
 
-		{
-			MutexLock local_lock(local_mutex);
-			for (uint32_t hash : hashes_added) {
-				HashMap<uint32_t, WorkerThreadPool::TaskID>::Iterator task_it = compilation_tasks.find(hash);
-				if (task_it != compilation_tasks.end()) {
-					compilation_tasks.remove(task_it);
-				}
-			}
-		}
-
 		return !hashes_added.is_empty();
 	}
 
-	void _wait_for_all_pipelines() {
-		thread_local LocalVector<WorkerThreadPool::TaskID> tasks_to_wait;
-		tasks_to_wait.clear();
+	Error _wait_for_compilation(const Ref<CompilationTask> &p_task) {
+		// The native task stays registered until clear_pipelines. Concurrent and
+		// later waiters can all use the same completion record without stale IDs,
+		// and pool workers retain the stock collaborative waiting behavior.
+		Error error = WorkerThreadPool::get_singleton()->wait_for_task_completion_without_reclaim(p_task->id);
+		if (error != OK) {
+			return error;
+		}
+		MutexLock local_lock(local_mutex);
+		return p_task->successful ? OK : ERR_CANT_CREATE;
+	}
+
+	Error _wait_for_all_pipelines() {
+		LocalVector<Ref<CompilationTask>> tasks_to_wait;
 		{
 			MutexLock local_lock(local_mutex);
-			for (KeyValue<uint32_t, WorkerThreadPool::TaskID> key_value : compilation_tasks) {
+			for (const KeyValue<uint32_t, Ref<CompilationTask>> &key_value : compilation_tasks) {
 				tasks_to_wait.push_back(key_value.value);
 			}
 		}
-
-		for (WorkerThreadPool::TaskID task_id : tasks_to_wait) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id);
+		// Join all tasks before reclaiming any completion records or resources.
+		for (const Ref<CompilationTask> &task : tasks_to_wait) {
+			Error error = WorkerThreadPool::get_singleton()->wait_for_task_completion_without_reclaim(task->id);
+			if (error != OK) {
+				return error;
+			}
 		}
+		for (const Ref<CompilationTask> &task : tasks_to_wait) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(task->id);
+		}
+		return OK;
 	}
 
 public:
@@ -104,6 +118,11 @@ public:
 		compiled_queue_mutex.lock();
 		compiled_queue.push_back({ p_hash, p_pipeline });
 		compiled_queue_mutex.unlock();
+		MutexLock local_lock(local_mutex);
+		Ref<CompilationTask> *task = compilation_tasks.getptr(p_hash);
+		if (task != nullptr) {
+			(*task)->successful = p_pipeline.is_valid();
+		}
 	}
 
 	// Start compilation of a pipeline ahead of time in the background. Returns true if the compilation was started, false if it wasn't required. Source is only used for collecting statistics.
@@ -148,31 +167,23 @@ public:
 #endif
 
 		// Queue a background compilation task.
-		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(creation_object, creation_function, p_key, p_high_priority, "PipelineCompilation");
-		compilation_tasks.insert(p_key_hash, task_id);
+		Ref<CompilationTask> task;
+		task.instantiate();
+		task->id = WorkerThreadPool::get_singleton()->add_template_task(creation_object, creation_function, p_key, p_high_priority, "PipelineCompilation");
+		compilation_tasks.insert(p_key_hash, task);
 	}
 
-	void wait_for_pipeline(uint32_t p_key_hash) {
-		WorkerThreadPool::TaskID task_id_to_wait = WorkerThreadPool::INVALID_TASK_ID;
-
+	Error wait_for_pipeline(uint32_t p_key_hash) {
+		Ref<CompilationTask> task;
 		{
 			MutexLock local_lock(local_mutex);
-			if (!compilation_set.has(p_key_hash)) {
-				// The pipeline was never submitted, we can't wait for it.
-				return;
+			const Ref<CompilationTask> *task_ptr = compilation_tasks.getptr(p_key_hash);
+			if (task_ptr == nullptr) {
+				return ERR_DOES_NOT_EXIST;
 			}
-
-			HashMap<uint32_t, WorkerThreadPool::TaskID>::Iterator task_it = compilation_tasks.find(p_key_hash);
-			if (task_it != compilation_tasks.end()) {
-				// Wait for and remove the compilation task if it exists.
-				task_id_to_wait = task_it->value;
-				compilation_tasks.remove(task_it);
-			}
+			task = *task_ptr;
 		}
-
-		if (task_id_to_wait != WorkerThreadPool::INVALID_TASK_ID) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id_to_wait);
-		}
+		return _wait_for_compilation(task);
 	}
 
 	// Retrieve a pipeline. It'll return an empty pipeline if it's not available yet, but it'll be guaranteed to succeed if 'wait for compilation' is true and stall as necessary. Source is just an optional number to aid debugging.
@@ -212,7 +223,8 @@ public:
 
 	// Delete all cached pipelines. Can stall if background compilation is in progress.
 	void clear_pipelines() {
-		_wait_for_all_pipelines();
+		Error wait_error = _wait_for_all_pipelines();
+		ERR_FAIL_COND_MSG(wait_error != OK, "Cannot clear pipelines while a native compilation task is still active.");
 		_add_new_pipelines_to_map();
 
 		for (KeyValue<uint32_t, RID> entry : hash_map) {
@@ -221,6 +233,7 @@ public:
 
 		hash_map.clear();
 		compilation_set.clear();
+		compilation_tasks.clear();
 	}
 
 	// Set the external pipeline compilations array to increase the counters on every time a pipeline is compiled.

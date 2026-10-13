@@ -35,6 +35,8 @@ TEST_FORCE_LINK(test_worker_thread_pool)
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
+#include "core/os/semaphore.h"
+#include "core/os/thread.h"
 
 namespace TestWorkerThreadPool {
 
@@ -172,5 +174,96 @@ TEST_CASE("[WorkerThreadPool] Run a yielding daemon as the only hope for other t
 	}
 	CHECK_MESSAGE(all_needed_yield, "All legit tasks should have needed the daemon yielding to run.");
 }
+
+#ifdef THREADS_ENABLED
+struct RetainedCompletionFixture {
+	WorkerThreadPool *pool = nullptr;
+	WorkerThreadPool::TaskID task = WorkerThreadPool::INVALID_TASK_ID;
+	Semaphore release;
+	Semaphore entered;
+	SafeNumeric<uint32_t> ran;
+};
+
+struct RetainedCompletionWaiter {
+	RetainedCompletionFixture *fixture = nullptr;
+	Error first = FAILED;
+	Error second = FAILED;
+};
+
+static void retained_completion_work(void *p_userdata) {
+	RetainedCompletionFixture *fixture = static_cast<RetainedCompletionFixture *>(p_userdata);
+	fixture->release.wait();
+	fixture->ran.increment();
+}
+
+static void retained_completion_wait(void *p_userdata) {
+	RetainedCompletionWaiter *waiter = static_cast<RetainedCompletionWaiter *>(p_userdata);
+	waiter->fixture->entered.post();
+	waiter->first = waiter->fixture->pool->wait_for_task_completion_without_reclaim(waiter->fixture->task);
+	waiter->second = waiter->fixture->pool->wait_for_task_completion_without_reclaim(waiter->fixture->task);
+}
+
+TEST_CASE("[WorkerThreadPool] Retain completion for concurrent and repeated native waits") {
+	RetainedCompletionFixture fixture;
+	fixture.pool = WorkerThreadPool::get_singleton();
+	fixture.task = fixture.pool->add_native_task(retained_completion_work, &fixture, true);
+	RetainedCompletionWaiter first;
+	RetainedCompletionWaiter second;
+	first.fixture = &fixture;
+	second.fixture = &fixture;
+	Thread first_thread;
+	Thread second_thread;
+	first_thread.start(retained_completion_wait, &first);
+	second_thread.start(retained_completion_wait, &second);
+	fixture.entered.wait();
+	fixture.entered.wait();
+	fixture.release.post();
+	first_thread.wait_to_finish();
+	second_thread.wait_to_finish();
+	CHECK(first.first == OK);
+	CHECK(first.second == OK);
+	CHECK(second.first == OK);
+	CHECK(second.second == OK);
+	CHECK(fixture.ran.get() == 1);
+	CHECK(fixture.pool->is_task_completed(fixture.task));
+	CHECK(fixture.pool->wait_for_task_completion(fixture.task) == OK);
+	ERR_PRINT_OFF;
+	CHECK(fixture.pool->wait_for_task_completion_without_reclaim(fixture.task) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
+}
+
+struct CollaborativeCompletionFixture {
+	WorkerThreadPool *pool = nullptr;
+	SafeNumeric<uint32_t> ran;
+	Error first = FAILED;
+	Error second = FAILED;
+	Error reclaimed = FAILED;
+};
+
+static void collaborative_completion_child(void *p_userdata) {
+	static_cast<CollaborativeCompletionFixture *>(p_userdata)->ran.increment();
+}
+
+static void collaborative_completion_parent(void *p_userdata) {
+	CollaborativeCompletionFixture *fixture = static_cast<CollaborativeCompletionFixture *>(p_userdata);
+	WorkerThreadPool::TaskID child = fixture->pool->add_native_task(collaborative_completion_child, fixture, true);
+	fixture->first = fixture->pool->wait_for_task_completion_without_reclaim(child);
+	fixture->second = fixture->pool->wait_for_task_completion_without_reclaim(child);
+	fixture->reclaimed = fixture->pool->wait_for_task_completion(child);
+}
+
+TEST_CASE("[WorkerThreadPool] Retained native completion preserves one-worker collaborative progress") {
+	WorkerThreadPool pool(false);
+	pool.init(1);
+	CollaborativeCompletionFixture fixture;
+	fixture.pool = &pool;
+	WorkerThreadPool::TaskID parent = pool.add_native_task(collaborative_completion_parent, &fixture, true);
+	CHECK(pool.wait_for_task_completion(parent) == OK);
+	CHECK(fixture.first == OK);
+	CHECK(fixture.second == OK);
+	CHECK(fixture.reclaimed == OK);
+	CHECK(fixture.ran.get() == 1);
+}
+#endif
 
 } // namespace TestWorkerThreadPool

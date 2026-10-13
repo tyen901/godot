@@ -39,6 +39,7 @@
 using namespace RendererSceneRenderImplementation;
 
 void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
+	preparation_tracker.wait();
 	//compile
 
 	code = p_code;
@@ -568,6 +569,7 @@ SceneShaderForwardClustered::ShaderData::ShaderData() :
 }
 
 SceneShaderForwardClustered::ShaderData::~ShaderData() {
+	preparation_tracker.wait();
 	pipeline_hash_map.clear_pipelines();
 
 	if (version.is_valid()) {
@@ -1029,6 +1031,7 @@ void fragment() {
 }
 
 void SceneShaderForwardClustered::set_default_specialization(const ShaderSpecialization &p_specialization) {
+	shader.wait_for_pipeline_preparations();
 	default_specialization = p_specialization;
 
 	for (ShaderData &shader_data : shader_list) {

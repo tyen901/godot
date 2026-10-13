@@ -260,6 +260,8 @@ void RenderingServerDefault::_init() {
 }
 
 void RenderingServerDefault::_finish() {
+	pipeline_preparation_stopping = true;
+	RenderingPipelinePreparation::wait_for_all();
 	if (test_cube.is_valid()) {
 		free_rid(test_cube);
 	}
@@ -432,6 +434,60 @@ void RenderingServerDefault::_thread_loop() {
 void RenderingServerDefault::set_physics_interpolation_enabled(bool p_enabled) {
 	RSG::canvas->set_physics_interpolation_enabled(p_enabled);
 	RSG::scene->set_physics_interpolation_enabled(p_enabled);
+}
+
+Ref<RenderingPipelinePreparation> RenderingServerDefault::_geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) {
+	if (pipeline_preparation_stopping) {
+		return Ref<RenderingPipelinePreparation>();
+	}
+	return RSG::scene->geometry_prepare_pipeline_snapshot(p_base, p_material_override, p_shadow_casting, p_use_skeleton);
+}
+
+Error RenderingServerDefault::geometry_prepare_pipelines(const Ref<Resource> &p_base, const Ref<Resource> &p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) {
+	ERR_FAIL_COND_V(p_base.is_null(), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_shadow_casting < RSE::SHADOW_CASTING_SETTING_OFF || p_shadow_casting > RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V_MSG(create_thread && Thread::get_caller_id() == server_thread, ERR_BUSY, "Pipeline preparation must be called from a resource loader, not the rendering thread.");
+
+	// Copies are intentional: Resource ownership lasts until every native worker
+	// has completed, even if the caller drops its references during this call.
+	Ref<Resource> base = p_base;
+	Ref<Resource> material_override = p_material_override;
+	RID base_rid = base->get_rid();
+	RID material_rid = material_override.is_valid() ? material_override->get_rid() : RID();
+	ERR_FAIL_COND_V(base_rid.is_null() || (material_override.is_valid() && material_rid.is_null()), ERR_INVALID_PARAMETER);
+	Ref<RenderingPipelinePreparation> preparation;
+	if (Thread::get_caller_id() == server_thread) {
+		command_queue.flush_if_pending();
+		preparation = _geometry_prepare_pipeline_snapshot(base_rid, material_rid, p_shadow_casting, p_use_skeleton);
+	} else {
+		command_queue.push_and_ret(this, &RenderingServerDefault::_geometry_prepare_pipeline_snapshot, &preparation, base_rid, material_rid, p_shadow_casting, p_use_skeleton);
+	}
+	if (preparation.is_null()) {
+		return ERR_UNAVAILABLE;
+	}
+	preparation->retain_resources(base, material_override);
+	if (preparation->error != OK) {
+		return preparation->error;
+	}
+
+	if (Thread::is_main_thread() || WorkerThreadPool::get_singleton()->get_caller_task_id() != WorkerThreadPool::INVALID_TASK_ID) {
+#ifdef THREADS_ENABLED
+		// Synchronous ResourceLoader calls still compile away from the renderer.
+		// Nothing in this worker queues a command back to the waiting main thread.
+		Thread worker;
+		worker.start([](void *p_userdata) {
+			Thread::set_name("PipelinePreparation");
+			RenderingPipelinePreparation *job = static_cast<RenderingPipelinePreparation *>(p_userdata);
+			job->error = job->compile();
+		}, preparation.ptr());
+		ERR_FAIL_COND_V(!worker.is_started(), ERR_CANT_CREATE);
+		worker.wait_to_finish();
+		return preparation->error;
+#else
+		return ERR_UNAVAILABLE;
+#endif
+	}
+	return preparation->compile();
 }
 
 /* EVENT QUEUING */

@@ -1608,6 +1608,10 @@ Variant RendererSceneCull::instance_geometry_get_shader_parameter_default_value(
 	return instance->instance_uniforms.get_default(p_parameter);
 }
 
+Ref<RenderingPipelinePreparation> RendererSceneCull::geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) {
+	return scene_render->geometry_prepare_pipeline_snapshot(p_base, p_material_override, p_shadow_casting, p_use_skeleton);
+}
+
 void RendererSceneCull::mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) {
 	scene_render->mesh_generate_pipelines(p_mesh, p_background_compilation);
 }

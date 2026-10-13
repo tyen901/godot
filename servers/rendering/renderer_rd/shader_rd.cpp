@@ -943,6 +943,7 @@ void ShaderRD::enable_group(int p_group) {
 		return;
 	}
 
+	preparation_tracker.wait();
 	group_enabled.write[p_group] = true;
 
 	// Compile all versions again to include the new group.
@@ -1238,6 +1239,7 @@ bool ShaderRD::shader_cache_save_compressed_zstd = true;
 bool ShaderRD::shader_cache_save_debug = true;
 
 ShaderRD::~ShaderRD() {
+	preparation_tracker.wait();
 	LocalVector<RID> remaining = version_owner.get_owned_list();
 	if (remaining.size()) {
 		ERR_PRINT(itos(remaining.size()) + " shaders of type " + name + " were never freed");

@@ -2951,7 +2951,6 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 
 	for (uint64_t i = p_from; i < p_to; i++) {
 		bool mesh_visible = false;
-		bool in_frustum = false;
 
 		InstanceData &idata = cull_data.scenario->instance_data[i];
 		uint32_t visibility_flags = idata.flags & (InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE | InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN | InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN);
@@ -2967,7 +2966,6 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 
 		if (!HIDDEN_BY_VISIBILITY_CHECKS) {
 			if ((LAYER_CHECK && IN_FRUSTUM(cull_data.cull->frustum) && VIS_CHECK && !OCCLUSION_CULLED) || (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_ALL_CULLING)) {
-				in_frustum = true;
 				uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 				if (base_type == RSE::INSTANCE_LIGHT) {
 					cull_result.lights.push_back(idata.instance);

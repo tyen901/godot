@@ -475,6 +475,11 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 			// Stencil modes.
 
 			for (int i = 0; i < pnode->stencil_modes.size(); i++) {
+				if (p_default_actions.stencil_mode_defines.has(pnode->stencil_modes[i]) && !used_smode_defines.has(pnode->stencil_modes[i])) {
+					r_gen_code.defines.push_back(p_default_actions.stencil_mode_defines[pnode->stencil_modes[i]]);
+					used_smode_defines.insert(pnode->stencil_modes[i]);
+				}
+
 				if (p_actions.stencil_mode_values.has(pnode->stencil_modes[i])) {
 					Pair<int *, int> &p = p_actions.stencil_mode_values[pnode->stencil_modes[i]];
 					*p.first = p.second;
@@ -1512,12 +1517,21 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 					code = "return;";
 				}
 			} else if (cfnode->flow_op == SL::FLOW_OP_DISCARD) {
+				if (p_default_actions.usage_defines.has("DISCARD") && !used_name_defines.has("DISCARD")) {
+					String define = p_default_actions.usage_defines["DISCARD"];
+					if (define.begins_with("@")) {
+						define = p_default_actions.usage_defines[define.substr(1)];
+					}
+					r_gen_code.defines.push_back(define);
+					used_name_defines.insert("DISCARD");
+				}
+
 				if (p_actions.usage_flag_pointers.has("DISCARD") && !used_flag_pointers.has("DISCARD")) {
 					*p_actions.usage_flag_pointers["DISCARD"] = true;
 					used_flag_pointers.insert("DISCARD");
 				}
 
-				code = "discard;";
+				code = p_default_actions.renames.has("DISCARD") ? p_default_actions.renames["DISCARD"] + ";" : "discard;";
 			} else if (cfnode->flow_op == SL::FLOW_OP_CONTINUE) {
 				code = "continue;";
 			} else if (cfnode->flow_op == SL::FLOW_OP_BREAK) {
@@ -1662,6 +1676,7 @@ Error ShaderCompiler::compile(RSE::ShaderMode p_mode, const String &p_code, Iden
 
 	used_name_defines.clear();
 	used_rmode_defines.clear();
+	used_smode_defines.clear();
 	used_flag_pointers.clear();
 	fragment_varyings.clear();
 

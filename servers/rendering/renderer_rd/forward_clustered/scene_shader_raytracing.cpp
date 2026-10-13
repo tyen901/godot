@@ -29,18 +29,56 @@
 /**************************************************************************/
 
 #include "scene_shader_raytracing.h"
+#include "core/io/resource_loader.h"
 
 #include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
+#include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/io/marshalls.h"
 #include "core/math/math_defs.h"
 #include "core/os/os.h"
+#include "core/version.h"
+#include "servers/rendering/shader_include_db.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/storage/environment_storage.h"
 
+#include "modules/modules_enabled.gen.h"
+
 using namespace RendererSceneRenderImplementation;
+
+// Custom hit stages bypass ShaderRD's variant cache. Store their SPIR-V beside
+// native shader caches, addressed by fully expanded source, stage and engine build.
+static Vector<uint8_t> _compile_custom_stage(RD::ShaderStage p_stage, const String &p_source, String *r_error, uint32_t &r_cache_hits, uint32_t &r_compilations) {
+	const String source = ShaderIncludeDB::parse_include_files(p_source);
+	const String cache_root = ShaderRD::get_shader_cache_user_dir();
+	String path;
+	if (!cache_root.is_empty()) {
+		const String directory = cache_root.path_join("rt_custom_spirv");
+		const String identity = String(GODOT_VERSION_FULL_CONFIG) + GODOT_VERSION_HASH + RD::get_singleton()->get_device_api_name() + itos(p_stage) + source;
+		path = directory.path_join(identity.sha256_text() + ".spv");
+		if (FileAccess::exists(path)) {
+			Vector<uint8_t> cached = FileAccess::get_file_as_bytes(path);
+			if (cached.size() >= 20 && cached.size() % 4 == 0 && decode_uint32(cached.ptr()) == 0x07230203) {
+				r_cache_hits++;
+				return cached;
+			}
+			DirAccess::remove_absolute(path);
+		}
+		DirAccess::make_dir_recursive_absolute(directory);
+	}
+	r_compilations++;
+	Vector<uint8_t> spirv = RD::get_singleton()->shader_compile_spirv_from_source(p_stage, source, RD::SHADER_LANGUAGE_GLSL, r_error);
+	if (!spirv.is_empty() && !path.is_empty()) {
+		Ref<FileAccess> file = FileAccess::open(path, FileAccess::WRITE);
+		if (file.is_valid()) {
+			file->store_buffer(spirv);
+		}
+	}
+	return spirv;
+}
 
 static void _dump_failed_shader(const String &p_source, const String &p_label) {
 	String tmp_dir = OS::get_singleton()->get_temp_path();
@@ -386,18 +424,27 @@ void SceneShaderRaytracing::invalidate_pipeline_bundles() {
 
 struct SceneShaderRaytracing::PipelineBuildTask {
 	uint32_t rt_flags = 0;
+	bool prepare_only = false;
+	bool allow_supersede = true;
+	bool superseded = false;
+	uint64_t registry_revision = 0;
 
 	RID base_shader;
 	Vector<RD::PipelineSpecializationConstant> spec_constants;
 	Vector<RD::ShaderStageSPIRVData> base_non_hit_stages;
+	Vector<RD::ShaderStageSPIRVData> base_stages;
 	RD::ShaderStageSPIRVData base_any_hit_stage;
 	bool base_any_hit_valid = false;
 
+	LocalVector<uint32_t> logical_slot_to_physical_hg;
 	struct SlotInput {
+		SourceHash128 source_hash;
+		uint32_t callable_index = UINT32_MAX;
 		RID existing_per_hg_shader;
 		bool needs_compile = false;
 		bool uses_alpha_clip = false;
 		bool is_procedural = false;
+		bool is_decal = false;
 		String ch_src;
 		String ah_src;
 		String is_src;
@@ -406,6 +453,19 @@ struct SceneShaderRaytracing::PipelineBuildTask {
 
 	LocalVector<RID> new_per_hg_shaders;
 	LocalVector<bool> new_ready_mask;
+	uint32_t spirv_cache_hits = 0;
+	uint32_t spirv_compilations = 0;
+	uint64_t compile_started_usec = 0;
+	uint64_t generated_usec = 0;
+	uint64_t enqueued_usec = 0;
+	uint64_t worker_done_usec = 0;
+	uint64_t stage_usec = 0;
+	uint64_t binary_usec = 0;
+	uint64_t shader_usec = 0;
+	uint64_t pipeline_usec = 0;
+	uint64_t max_stage_usec = 0;
+	uint32_t reused_count = 0;
+	uint32_t created_count = 0;
 	RID new_pipeline;
 	bool failed = false;
 	String error;
@@ -432,6 +492,24 @@ void SceneShaderRaytracing::_strip_texture_globals(String &r_globals, const Stri
 	r_globals = r_globals.substr(0, line_start) + r_globals.substr(line_end);
 }
 
+// The bytes one uniform occupies in the std140 block, as ShaderCompiler lays
+// it out: a global is an index into the global buffer and an array pads every
+// element to 16 bytes.
+uint32_t SceneShaderRaytracing::uniform_std140_size(const ShaderLanguage::ShaderNode::Uniform &p_uniform) {
+	if (p_uniform.scope == ShaderLanguage::ShaderNode::Uniform::SCOPE_GLOBAL) {
+		return ShaderLanguage::get_datatype_size(ShaderLanguage::TYPE_UINT);
+	}
+	uint32_t size = ShaderLanguage::get_datatype_size(p_uniform.type);
+	if (p_uniform.array_size > 0) {
+		size *= p_uniform.array_size;
+		uint32_t m = 16 * p_uniform.array_size;
+		if (size % m != 0) {
+			size += m - (size % m);
+		}
+	}
+	return size;
+}
+
 void SceneShaderRaytracing::_finalize_uniforms_with_textures(
 		CustomShaderEntry &r_entry,
 		const ShaderCompiler::GeneratedCode &p_gen_code,
@@ -443,10 +521,10 @@ void SceneShaderRaytracing::_finalize_uniforms_with_textures(
 	uint32_t raw_uniform_end = 0;
 	for (const KeyValue<StringName, ShaderLanguage::ShaderNode::Uniform> &kv : p_uniforms) {
 		const ShaderLanguage::ShaderNode::Uniform &uu = kv.value;
-		if (ShaderLanguage::is_sampler_type(uu.type) || uu.order < 0 || uu.order >= (int)p_gen_code.uniform_offsets.size()) {
+		if (ShaderLanguage::is_sampler_type(uu.type) || uu.scope == ShaderLanguage::ShaderNode::Uniform::SCOPE_INSTANCE || uu.order < 0 || uu.order >= (int)p_gen_code.uniform_offsets.size()) {
 			continue;
 		}
-		uint32_t end = p_gen_code.uniform_offsets[uu.order] + ShaderLanguage::get_datatype_size(uu.type);
+		uint32_t end = p_gen_code.uniform_offsets[uu.order] + uniform_std140_size(uu);
 		if (end > raw_uniform_end) {
 			raw_uniform_end = end;
 		}
@@ -529,6 +607,7 @@ uint32_t SceneShaderRaytracing::_register_slot(uint32_t /*p_shader_id*/, RID p_m
 		failed_slot.state = HGState::Failed;
 		uint32_t failed_index = (uint32_t)hit_group_slots.size();
 		hit_group_slots.push_back(failed_slot);
+		shader_registry_revision.increment();
 		source_hash_to_slot.insert(hash, failed_index);
 		for (KeyValue<uint32_t, PipelineBundle> &kv : pipeline_bundles) {
 			_bundle_resize_for_slots(kv.value);
@@ -544,12 +623,14 @@ uint32_t SceneShaderRaytracing::_register_slot(uint32_t /*p_shader_id*/, RID p_m
 		return 0;
 	}
 
+	if (entry.is_decal) { entry.callable_index = decal_callable_count++; }
 	HitGroupSlot slot;
 	slot.source_hash = hash;
 	slot.state = HGState::Ready;
 	slot.entry = entry;
 	uint32_t slot_index = (uint32_t)hit_group_slots.size();
 	hit_group_slots.push_back(slot);
+	shader_registry_revision.increment();
 	source_hash_to_slot.insert(hash, slot_index);
 
 	for (KeyValue<uint32_t, PipelineBundle> &kv : pipeline_bundles) {
@@ -575,9 +656,14 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 		actions.entry_point_stages["intersection"] = ShaderCompiler::STAGE_INTERSECTION;
 	}
 
+	actions.render_mode_flags["decal"] = &r_entry.is_decal;
+	actions.render_mode_flags["blend_mul"] = &r_entry.decal_blend_mul;
 	bool detected_alpha_clip = false;
+	bool uses_streaming_lod = false;
+	actions.usage_flag_pointers["STREAMING_LOD"] = &uses_streaming_lod;
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &detected_alpha_clip;
 	actions.usage_flag_pointers["ALPHA_HASH_SCALE"] = &detected_alpha_clip;
+	actions.usage_flag_pointers["DISCARD"] = &detected_alpha_clip;
 
 	HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniform_sink;
 	actions.uniforms = &uniform_sink;
@@ -591,10 +677,15 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	}
 
 	r_entry.is_procedural = p_is_procedural;
-	r_entry.uses_alpha_clip = detected_alpha_clip;
+	r_entry.uses_alpha_clip = detected_alpha_clip && !r_entry.is_decal;
 	r_entry.vertex_code = gen_code.code.has("vertex") ? gen_code.code["vertex"] : String();
 	r_entry.fragment_code = gen_code.code.has("fragment") ? gen_code.code["fragment"] : String();
 	r_entry.fragment_globals = gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT];
+	if (uses_streaming_lod) {
+		// Custom hit stages do not pass GeneratedCode::defines through ShaderRD.
+		// Carry this usage define with the injected globals into hit/callable code.
+		r_entry.fragment_globals = "#define STREAMING_LOD_USED\n" + r_entry.fragment_globals;
+	}
 	if (p_is_procedural) {
 		r_entry.intersection_code = gen_code.code.has("intersection") ? gen_code.code["intersection"] : String();
 		r_entry.intersection_globals = gen_code.stage_globals[ShaderCompiler::STAGE_INTERSECTION];
@@ -604,6 +695,13 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	r_entry.uniform_offsets = gen_code.uniform_offsets;
 	r_entry.uniforms = uniform_sink;
 	_finalize_uniforms_with_textures(r_entry, gen_code, uniform_sink, /*strip_intersection_globals=*/p_is_procedural);
+	if (r_entry.is_decal) {
+		ERR_FAIL_COND_V_MSG(!r_entry.vertex_code.is_empty(), false, "Decal materials cannot displace receiver geometry.");
+		for (const auto &uniform : uniform_sink) {
+			const auto hint = uniform.value.hint;
+			ERR_FAIL_COND_V_MSG(hint == ShaderLanguage::ShaderNode::Uniform::HINT_SCREEN_TEXTURE || hint == ShaderLanguage::ShaderNode::Uniform::HINT_DEPTH_TEXTURE || hint == ShaderLanguage::ShaderNode::Uniform::HINT_NORMAL_ROUGHNESS_TEXTURE, false, "Decal materials evaluate actual ray hits, not screen textures.");
+		}
+	}
 	return true;
 }
 
@@ -746,6 +844,7 @@ bool SceneShaderRaytracing::_ensure_variant_compile_context(uint32_t p_rt_flags)
 	ERR_FAIL_COND_V(base_ch_ver < 0 || base_ah_ver < 0, false);
 
 	VariantCompileContext ctx;
+	ctx.callable_template = base_ch_src.insert(base_ch_src.find("\n", base_ch_ver) + 1, "#define RT_DECAL_CALLABLE\n").replace("shader_stage(closest_hit)", "shader_stage(callable)");
 	ctx.ch_template = base_ch_src.insert(base_ch_src.find("\n", base_ch_ver) + 1, custom_hg_define);
 	ctx.ah_template = base_ah_src.insert(base_ah_src.find("\n", base_ah_ver) + 1, custom_hg_define);
 	if (!intersection_source_template.is_empty()) {
@@ -772,6 +871,7 @@ bool SceneShaderRaytracing::_ensure_variant_compile_context(uint32_t p_rt_flags)
 		}
 	}
 
+	ctx.base_stages = base_stages;
 	variant_compile_contexts.insert(p_rt_flags, ctx);
 
 	// Creates layout-defining base_shader RID for uniform sets (immutable per variant).
@@ -826,6 +926,7 @@ const SceneShaderRaytracing::PipelineBundle &SceneShaderRaytracing::ensure_pipel
 	}
 
 	if (!_ensure_variant_compile_context(p_rt_flags)) {
+		pipeline_bundles[p_rt_flags].build_failed = true;
 		WARN_PRINT(vformat("RT: Failed to build base compile context for variant 0x%x.", p_rt_flags));
 		return EMPTY_BUNDLE;
 	}
@@ -835,12 +936,14 @@ const SceneShaderRaytracing::PipelineBundle &SceneShaderRaytracing::ensure_pipel
 
 	// Sync bootstrap: HG0-only pipeline + SBT on render thread; dirty if extra slots exist.
 	if (!_build_initial_bundle(p_rt_flags, bundle)) {
+		bundle.build_failed = true;
 		return EMPTY_BUNDLE;
 	}
 	if (hit_group_slots.size() > 1) {
 		bundle.dirty = true;
 	}
 	bundle.initial_pipeline_built = true;
+	RendererRD::MaterialStorage::get_singleton()->prepare_raytracing_materials(true);
 	return bundle;
 }
 
@@ -915,6 +1018,7 @@ bool SceneShaderRaytracing::_build_initial_bundle(uint32_t p_rt_flags, PipelineB
 }
 
 SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_build_task(uint32_t p_rt_flags, PipelineBundle &p_bundle) {
+	const uint64_t generate_start = OS::get_singleton()->get_ticks_usec();
 	if (!_ensure_variant_compile_context(p_rt_flags)) {
 		return nullptr;
 	}
@@ -928,6 +1032,7 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 	task->rt_flags = p_rt_flags;
 	task->base_shader = p_bundle.base_shader;
 	task->base_non_hit_stages = ctx.base_non_hit_stages;
+	task->base_stages = ctx.base_stages;
 	task->base_any_hit_stage = ctx.base_any_hit_stage;
 	task->base_any_hit_valid = ctx.base_any_hit_valid;
 	{
@@ -940,6 +1045,8 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 
 	uint32_t slot_count = (uint32_t)hit_group_slots.size();
 	task->slots.resize(slot_count);
+	task->registry_revision = shader_registry_revision.get();
+	task->allow_supersede = !p_bundle.retried_snapshot;
 
 	task->slots[0].existing_per_hg_shader = RID();
 	task->slots[0].needs_compile = false;
@@ -950,6 +1057,9 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 
 		si.uses_alpha_clip = slot.entry.uses_alpha_clip;
 		si.is_procedural = slot.entry.is_procedural;
+		si.is_decal = slot.entry.is_decal;
+		si.source_hash = slot.source_hash;
+		si.callable_index = slot.entry.callable_index;
 
 		if (slot.state != HGState::Ready) {
 			si.needs_compile = false;
@@ -1007,7 +1117,8 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 		}
 
 		{
-			String s = ctx.ch_template;
+			String s = si.is_decal ? ctx.callable_template : ctx.ch_template;
+			if (si.is_decal && entry.decal_blend_mul) s = s.insert(s.find("\n", s.find("#version")) + 1, "#define RT_DECAL_BLEND_MUL\n");
 			s = s.replace("/* RT_CUSTOM_FRAGMENT_GLOBALS */", entry.fragment_globals);
 			s = s.replace("/* RT_CUSTOM_FRAGMENT_CODE */", fragment_code);
 			s = s.replace("/* RT_CUSTOM_UNIFORM_MEMBERS */", uniform_members);
@@ -1036,6 +1147,7 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 		}
 	}
 
+	task->generated_usec = OS::get_singleton()->get_ticks_usec() - generate_start;
 	return task;
 }
 
@@ -1049,10 +1161,12 @@ void SceneShaderRaytracing::_build_pipeline_worker_static(void *p_userdata) {
 }
 
 void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
+	p_task->compile_started_usec = OS::get_singleton()->get_ticks_usec();
 	auto check_abort = [p_task]() {
 		return p_task->abort_requested.is_set();
 	};
 	auto finish = [p_task]() {
+		p_task->worker_done_usec = OS::get_singleton()->get_ticks_usec();
 		p_task->done.set();
 	};
 
@@ -1092,6 +1206,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		const PipelineBuildTask::SlotInput &si = p_task->slots[i];
 
 		if (si.existing_per_hg_shader.is_valid()) {
+			p_task->reused_count++;
 			p_task->new_per_hg_shaders[i] = si.existing_per_hg_shader;
 			p_task->new_ready_mask[i] = true;
 			continue;
@@ -1102,15 +1217,19 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 			continue;
 		}
 
-		Vector<RD::ShaderStageSPIRVData> custom_stages = p_task->base_non_hit_stages;
+		Vector<RD::ShaderStageSPIRVData> custom_stages = si.is_decal ? p_task->base_stages : p_task->base_non_hit_stages;
 
 		Vector<uint8_t> ch_spirv;
 		{
+			const uint64_t stage_start = OS::get_singleton()->get_ticks_usec();
 			MutexLock lock(spirv_compile_mutex);
-			ch_spirv = RD::get_singleton()->shader_compile_spirv_from_source(
-					RD::SHADER_STAGE_CLOSEST_HIT, si.ch_src, RD::SHADER_LANGUAGE_GLSL, &error);
+			ch_spirv = _compile_custom_stage(si.is_decal ? RD::SHADER_STAGE_CALLABLE : RD::SHADER_STAGE_CLOSEST_HIT, si.ch_src, &error, p_task->spirv_cache_hits, p_task->spirv_compilations);
+			const uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - stage_start;
+			p_task->stage_usec += elapsed;
+			p_task->max_stage_usec = MAX(p_task->max_stage_usec, elapsed);
 		}
 		if (ch_spirv.is_empty()) {
+			ERR_PRINT(vformat("RT closest-hit shader hg%d (variant 0x%x): %s", i, p_task->rt_flags, error));
 			_dump_failed_shader(si.ch_src, vformat("hg%d_v%x_closest_hit", i, p_task->rt_flags));
 			p_task->new_per_hg_shaders[i] = RID();
 			p_task->new_ready_mask[i] = false;
@@ -1118,7 +1237,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		}
 		{
 			RD::ShaderStageSPIRVData sd;
-			sd.shader_stage = RD::SHADER_STAGE_CLOSEST_HIT;
+			sd.shader_stage = si.is_decal ? RD::SHADER_STAGE_CALLABLE : RD::SHADER_STAGE_CLOSEST_HIT;
 			sd.spirv = ch_spirv;
 			custom_stages.push_back(sd);
 		}
@@ -1126,9 +1245,12 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		if (si.uses_alpha_clip) {
 			Vector<uint8_t> ah_spirv;
 			{
+				const uint64_t stage_start = OS::get_singleton()->get_ticks_usec();
 				MutexLock lock(spirv_compile_mutex);
-				ah_spirv = RD::get_singleton()->shader_compile_spirv_from_source(
-						RD::SHADER_STAGE_ANY_HIT, si.ah_src, RD::SHADER_LANGUAGE_GLSL, &error);
+				ah_spirv = _compile_custom_stage(RD::SHADER_STAGE_ANY_HIT, si.ah_src, &error, p_task->spirv_cache_hits, p_task->spirv_compilations);
+				const uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - stage_start;
+				p_task->stage_usec += elapsed;
+				p_task->max_stage_usec = MAX(p_task->max_stage_usec, elapsed);
 			}
 			if (ah_spirv.is_empty()) {
 				_dump_failed_shader(si.ah_src, vformat("hg%d_v%x_any_hit", i, p_task->rt_flags));
@@ -1140,16 +1262,19 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 			sd.shader_stage = RD::SHADER_STAGE_ANY_HIT;
 			sd.spirv = ah_spirv;
 			custom_stages.push_back(sd);
-		} else if (p_task->base_any_hit_valid) {
+		} else if (!si.is_decal && p_task->base_any_hit_valid) {
 			custom_stages.push_back(p_task->base_any_hit_stage);
 		}
 
 		if (si.is_procedural && !si.is_src.is_empty()) {
 			Vector<uint8_t> is_spirv;
 			{
+				const uint64_t stage_start = OS::get_singleton()->get_ticks_usec();
 				MutexLock lock(spirv_compile_mutex);
-				is_spirv = RD::get_singleton()->shader_compile_spirv_from_source(
-						RD::SHADER_STAGE_INTERSECTION, si.is_src, RD::SHADER_LANGUAGE_GLSL, &error);
+				is_spirv = _compile_custom_stage(RD::SHADER_STAGE_INTERSECTION, si.is_src, &error, p_task->spirv_cache_hits, p_task->spirv_compilations);
+				const uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - stage_start;
+				p_task->stage_usec += elapsed;
+				p_task->max_stage_usec = MAX(p_task->max_stage_usec, elapsed);
 			}
 			if (is_spirv.is_empty()) {
 				_dump_failed_shader(si.is_src, vformat("hg%d_v%x_intersection", i, p_task->rt_flags));
@@ -1163,19 +1288,23 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 			custom_stages.push_back(sd);
 		}
 
+		const uint64_t binary_start = OS::get_singleton()->get_ticks_usec();
 		Vector<uint8_t> binary;
 		{
 			MutexLock lock(spirv_compile_mutex);
 			binary = RD::get_singleton()->shader_compile_binary_from_spirv(
 					custom_stages, vformat("RT_hg%d_v%x", i, p_task->rt_flags));
 		}
+		p_task->binary_usec += OS::get_singleton()->get_ticks_usec() - binary_start;
 		if (binary.is_empty()) {
 			p_task->new_per_hg_shaders[i] = RID();
 			p_task->new_ready_mask[i] = false;
 			continue;
 		}
 
+		const uint64_t shader_start = OS::get_singleton()->get_ticks_usec();
 		RID rid = RD::get_singleton()->shader_create_from_bytecode(binary);
+		p_task->shader_usec += OS::get_singleton()->get_ticks_usec() - shader_start;
 		if (!rid.is_valid()) {
 			p_task->new_per_hg_shaders[i] = RID();
 			p_task->new_ready_mask[i] = false;
@@ -1183,12 +1312,23 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		}
 		p_task->new_per_hg_shaders[i] = rid;
 		p_task->new_ready_mask[i] = true;
+		p_task->created_count++;
 		created_here.push_back(rid);
 	}
 
 	if (check_abort()) {
 		cleanup_created();
 		p_task->failed = true;
+		finish();
+		return;
+	}
+
+	if (!p_task->prepare_only && p_task->allow_supersede && p_task->registry_revision != shader_registry_revision.get()) {
+		p_task->prepare_only = true;
+		p_task->superseded = true;
+		print_line(vformat("RTX pipeline snapshot superseded before driver link: %d hit groups", n));
+	}
+	if (p_task->prepare_only) {
 		finish();
 		return;
 	}
@@ -1202,30 +1342,56 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 	// No-op HG: failed / pending slots + trailing SBT sentinel (never default material).
 	const RD::HitGroup empty_hg;
 
-	// Layout: [0] default [1..n-1] custom or empty [n] sentinel.
+	// Canonical physical order lets the native driver cache reuse this pipeline.
+	// Materials and callables retain their logical indices through SBT remapping.
+	struct OrderedSlot {
+		SourceHash128 hash;
+		uint32_t logical;
+		bool operator<(const OrderedSlot &p_other) const {
+			return hash.a == p_other.hash.a ? hash.b < p_other.hash.b : hash.a < p_other.hash.a;
+		}
+	};
+	LocalVector<OrderedSlot> order;
+	for (uint32_t i = 1; i < n; i++) { order.push_back({ p_task->slots[i].source_hash, i }); }
+	order.sort();
 	LocalVector<RD::HitGroup> hit_groups;
+	LocalVector<RD::PipelineShader> callables;
+	LocalVector<uint32_t> callable_indices;
+	p_task->logical_slot_to_physical_hg.resize(n);
+	p_task->logical_slot_to_physical_hg[0] = 0;
 	hit_groups.resize(n + 1);
 	hit_groups[0] = hg0_default;
-	for (uint32_t i = 1; i < n; i++) {
+	for (uint32_t physical = 1; physical < n; physical++) {
+		const uint32_t i = order[physical - 1].logical;
+		p_task->logical_slot_to_physical_hg[i] = physical;
+		if (p_task->slots[i].is_decal) {
+			if (!p_task->new_ready_mask[i]) { cleanup_created(); p_task->failed = true; p_task->error = "Decal callable compilation failed"; finish(); return; }
+			const uint32_t logical_callable = p_task->slots[i].callable_index;
+			if (logical_callable >= callable_indices.size()) { callable_indices.resize(logical_callable + 1); }
+			callable_indices[logical_callable] = callables.size();
+			callables.push_back({ p_task->new_per_hg_shaders[i], p_task->spec_constants });
+			hit_groups[physical] = empty_hg;
+			continue;
+		}
 		if (!p_task->new_ready_mask[i] || p_task->new_per_hg_shaders[i].is_null()) {
-			hit_groups[i] = empty_hg;
+			hit_groups[physical] = empty_hg;
 			continue;
 		}
 		RD::PipelineShader custom_ps = { p_task->new_per_hg_shaders[i], p_task->spec_constants };
 		RD::HitGroup hg;
 		hg.closest_hit_shader = custom_ps;
 		hg.any_hit_shader = p_task->slots[i].uses_alpha_clip ? custom_ps : base_ps;
-		if (p_task->slots[i].is_procedural) {
-			hg.intersection_shader = custom_ps;
-		}
-		hit_groups[i] = hg;
+		if (p_task->slots[i].is_procedural) { hg.intersection_shader = custom_ps; }
+		hit_groups[physical] = hg;
 	}
 	hit_groups[n] = empty_hg;
 
+	const uint64_t pipeline_start = OS::get_singleton()->get_ticks_usec();
 	RID new_pipeline = RD::get_singleton()->raytracing_pipeline_create(
 			{ &base_ps, 1 }, { &base_ps, 1 },
 			{ hit_groups.ptr(), (uint64_t)hit_groups.size() },
-			RT_MAX_RECURSION_DEPTH);
+			RT_MAX_RECURSION_DEPTH, { callables.ptr(), callables.size() }, { callable_indices.ptr(), callable_indices.size() });
+	p_task->pipeline_usec = OS::get_singleton()->get_ticks_usec() - pipeline_start;
 	if (new_pipeline.is_null()) {
 		cleanup_created();
 		p_task->failed = true;
@@ -1238,6 +1404,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 }
 
 void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) {
+	const uint64_t finalize_start = OS::get_singleton()->get_ticks_usec();
 	HashMap<uint32_t, PipelineBundle>::Iterator bit = pipeline_bundles.find(p_task->rt_flags);
 	if (bit == pipeline_bundles.end()) {
 		for (uint32_t i = 0; i < p_task->slots.size(); i++) {
@@ -1256,6 +1423,7 @@ void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) 
 	_bundle_resize_for_slots(bundle);
 
 	if (p_task->failed) {
+		bundle.build_failed = true;
 		WARN_PRINT(vformat("RT: pipeline rebuild failed for variant 0x%x: %s",
 				p_task->rt_flags, p_task->error));
 		return;
@@ -1279,11 +1447,28 @@ void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) 
 		}
 	}
 
+	if (p_task->prepare_only) {
+		// One obsolete retry coalesces late families without starving continuous streams.
+		bundle.retried_snapshot = bundle.retried_snapshot || p_task->superseded;
+		if (!bundle.prepared_batch) {
+			bundle.prepared_batch = true;
+			bundle.cohort_complete_frame = 0;
+			bundle.loading_barrier = ResourceLoader::get_loading_barrier();
+			print_line(vformat("RTX loading cohort sealed: barrier=%d groups=%d", bundle.loading_barrier, n));
+		}
+		bundle.dirty = true;
+		print_line(vformat("RTX shaders prepared: %d hit groups; SPIR-V cache hits=%d compiled=%d; waiting for native loading cohort", n, p_task->spirv_cache_hits, p_task->spirv_compilations));
+		return;
+	}
+	bundle.prepared_batch = false;
+	bundle.retried_snapshot = false;
+
 	static constexpr uint32_t HIT_SBT_CAPACITY = 4096;
 	uint32_t sbt_size = MAX(n, HIT_SBT_CAPACITY);
 
 	RID new_sbt = RD::get_singleton()->hit_sbt_create(p_task->new_pipeline, sbt_size);
 	if (new_sbt.is_null()) {
+		bundle.build_failed = true;
 		WARN_PRINT(vformat("RT: hit_sbt_create failed for variant 0x%x.", p_task->rt_flags));
 		RD::get_singleton()->free_rid(p_task->new_pipeline);
 		return;
@@ -1292,6 +1477,7 @@ void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) 
 
 	RD::HitShaderBindingTableRange sbt_range = RD::get_singleton()->hit_sbt_range_alloc(new_sbt, sbt_size);
 	if (!sbt_range) {
+		bundle.build_failed = true;
 		WARN_PRINT(vformat("RT: hit_sbt_range_alloc failed for variant 0x%x.", p_task->rt_flags));
 		RD::get_singleton()->free_rid(new_sbt);
 		RD::get_singleton()->free_rid(p_task->new_pipeline);
@@ -1302,7 +1488,7 @@ void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) 
 	LocalVector<uint32_t> indices;
 	indices.resize(sbt_size);
 	for (uint32_t i = 0; i < sbt_size; i++) {
-		indices[i] = (i < n) ? i : n;
+		indices[i] = (i < n) ? p_task->logical_slot_to_physical_hg[i] : n;
 	}
 	RD::get_singleton()->hit_sbt_range_update(new_sbt, sbt_range, 0, indices);
 
@@ -1316,7 +1502,12 @@ void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) 
 	bundle.pipeline = p_task->new_pipeline;
 	bundle.hit_sbt = new_sbt;
 	bundle.live_hg_count = n;
+	bundle.generation++;
 	bundle.live_ready_mask = p_task->new_ready_mask;
+	print_line(vformat("RTX material pipeline ready: %d hit groups, variant 0x%x; SPIR-V cache hits=%d compiled=%d; ready in %.2f ms", n, p_task->rt_flags, p_task->spirv_cache_hits, p_task->spirv_compilations, (OS::get_singleton()->get_ticks_usec() - p_task->compile_started_usec) / 1000.0));
+	if (OS::get_singleton()->has_environment("GODOT_RTX_PROFILE")) {
+		print_line(vformat("RTX PIPELINE PROFILE: snapshot=%d current=%d reused=%d created=%d generate=%.2f ms queue=%.2f ms stages=%.2f ms max_stage=%.2f ms binary=%.2f ms shader_create=%.2f ms RD_pipeline=%.2f ms finalize_wait=%.2f ms finalize=%.2f ms", n, hit_group_slots.size(), p_task->reused_count, p_task->created_count, p_task->generated_usec / 1000.0, (p_task->compile_started_usec - p_task->enqueued_usec) / 1000.0, p_task->stage_usec / 1000.0, p_task->max_stage_usec / 1000.0, p_task->binary_usec / 1000.0, p_task->shader_usec / 1000.0, p_task->pipeline_usec / 1000.0, (finalize_start - p_task->worker_done_usec) / 1000.0, (OS::get_singleton()->get_ticks_usec() - finalize_start) / 1000.0));
+	}
 }
 
 // Single-lane rebuild dispatcher.
@@ -1337,6 +1528,7 @@ void SceneShaderRaytracing::_dispatch_next_locked() {
 	PipelineBuildTask *t = compile_lane.queue[0];
 	compile_lane.queue.remove_at(0);
 	compile_lane.current = t;
+	t->enqueued_usec = OS::get_singleton()->get_ticks_usec();
 	t->worker_id = WorkerThreadPool::get_singleton()->add_native_task(
 			&SceneShaderRaytracing::_build_pipeline_worker_static, t, /*high_priority=*/false,
 			"RT Pipeline Build");
@@ -1355,8 +1547,26 @@ void SceneShaderRaytracing::_kick_rebuild_if_idle() {
 		if (!kv.value.dirty || !kv.value.initial_pipeline_built) {
 			continue;
 		}
+		if (kv.value.prepared_batch && ResourceLoader::is_loading_before(kv.value.loading_barrier)) {
+			continue;
+		}
+		if (kv.value.prepared_batch) {
+			const uint64_t frame = RSG::rasterizer->get_frame_number();
+			if (!kv.value.cohort_complete_frame) {
+				kv.value.cohort_complete_frame = frame;
+				continue;
+			}
+			if (frame <= kv.value.cohort_complete_frame) {
+				continue;
+			}
+			// A loader may finish after the normal material-update drain this frame.
+			RendererRD::MaterialStorage::get_singleton()->_update_queued_materials();
+			print_line(vformat("RTX pipeline snapshot sealed: barrier=%d groups=%d", kv.value.loading_barrier, hit_group_slots.size()));
+		}
 		PipelineBuildTask *task = _make_pipeline_build_task(kv.key, kv.value);
 		if (task) {
+			kv.value.build_failed = false;
+			task->prepare_only = !kv.value.prepared_batch;
 			kv.value.dirty = false;
 			_enqueue_build(task);
 		}
@@ -1426,6 +1636,11 @@ void SceneShaderRaytracing::_join_lane_for_shutdown() {
 		if (current->worker_id != WorkerThreadPool::INVALID_TASK_ID && WorkerThreadPool::get_singleton()) {
 			WorkerThreadPool::get_singleton()->wait_for_task_completion(current->worker_id);
 		}
+		for (uint32_t i = 0; i < current->new_per_hg_shaders.size(); i++) {
+			if (current->slots[i].existing_per_hg_shader.is_null() && current->new_per_hg_shaders[i].is_valid()) {
+				RD::get_singleton()->free_rid(current->new_per_hg_shaders[i]);
+			}
+		}
 		if (current->new_pipeline.is_valid()) {
 			RD::get_singleton()->free_rid(current->new_pipeline);
 		}
@@ -1447,7 +1662,13 @@ void SceneShaderRaytracing::init(const String p_defines) {
 	for (uint32_t mask = 0; mask < variant_count; mask++) {
 		modes_ptr[mask] = _raygen_variant_preamble(mask);
 	}
-	raygen_shader.initialize(modes, p_defines);
+	String defines = p_defines;
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	if (GLOBAL_GET("rendering/textures/streaming/enabled")) {
+		defines += "\n#define TEXTURE_STREAMING\n";
+	}
+#endif
+	raygen_shader.initialize(modes, defines);
 
 	// Slot 0: default HG (source_hash stays zero).
 	{
@@ -1458,14 +1679,11 @@ void SceneShaderRaytracing::init(const String p_defines) {
 
 	// Now create a version to access the embedded raytracing shader
 	raygen_shader_version = raygen_shader.version_create();
-	if (raygen_shader_version.is_valid()) {
-		const PipelineBundle &b = ensure_pipeline_bundle(RT_FLAG_NONE);
-		if (!b.pipeline.is_valid()) {
-			WARN_PRINT("Failed to create default raytracing pipeline bundle");
-		}
-	} else {
+	if (raygen_shader_version.is_null()) {
 		WARN_PRINT("Failed to create raytracing shader version");
 	}
+	// The first RT viewport creates its actual variant in build_tlas(). Creating
+	// RT_FLAG_NONE here also compiles every custom material for an unused variant.
 
 	{
 		// Shader compiler (not used for RT, but needed for compatibility).
@@ -1488,6 +1706,13 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["POSITION"] = "position";
 		actions.renames["UV"] = "uv_interp";
 		actions.renames["UV2"] = "uv2_interp";
+		actions.renames["STREAMING_LOD"] = "streaming_lod";
+		actions.renames["UV_DDX"] = "rt_uv_ddx";
+		actions.renames["UV_DDY"] = "rt_uv_ddy";
+		actions.renames["POSITION_WORLD_DDX"] = "rt_position_ddx";
+		actions.renames["POSITION_WORLD_DDY"] = "rt_position_ddy";
+		actions.renames["POSITION_OBJECT_DDX"] = "rt_object_ddx";
+		actions.renames["POSITION_OBJECT_DDY"] = "rt_object_ddy";
 		actions.renames["COLOR"] = "color_interp";
 		actions.renames["POINT_SIZE"] = "rt_point_size";
 		actions.renames["INSTANCE_ID"] = "rt_instance_id";
@@ -1512,6 +1737,7 @@ void SceneShaderRaytracing::init(const String p_defines) {
 
 		actions.renames["FRAGCOORD"] = "rt_frag_coord";
 		actions.renames["FRONT_FACING"] = "rt_front_facing";
+		actions.renames["IN_SHADOW_PASS"] = "((gl_IncomingRayFlagsEXT & gl_RayFlagsSkipClosestHitShaderEXT) != 0u)";
 		actions.renames["NORMAL_MAP"] = "normal_map";
 		actions.renames["NORMAL_MAP_DEPTH"] = "normal_map_depth";
 		actions.renames["ALBEDO"] = "albedo";
@@ -1531,6 +1757,7 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["SSS_TRANSMITTANCE_DEPTH"] = "transmittance_depth";
 		actions.renames["SSS_TRANSMITTANCE_BOOST"] = "transmittance_boost";
 		actions.renames["BACKLIGHT"] = "backlight";
+		actions.renames["TRANSMISSION"] = "transmission";
 		actions.renames["AO"] = "ao";
 		actions.renames["AO_LIGHT_AFFECT"] = "ao_light_affect";
 		actions.renames["EMISSION"] = "emission";
@@ -1538,6 +1765,7 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["INSTANCE_CUSTOM"] = "instance_custom";
 		actions.renames["SCREEN_UV"] = "rt_screen_uv";
 		actions.renames["DEPTH"] = "rt_depth";
+		actions.renames["DISCARD"] = "rt_discard()";
 		actions.renames["FOG"] = "fog";
 		actions.renames["RADIANCE"] = "custom_radiance";
 		actions.renames["IRRADIANCE"] = "custom_irradiance";
@@ -1583,6 +1811,7 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.usage_defines["AO_LIGHT_AFFECT"] = "#define AO_USED\n";
 		actions.usage_defines["UV"] = "#define UV_USED\n";
 		actions.usage_defines["UV2"] = "#define UV2_USED\n";
+		actions.usage_defines["STREAMING_LOD"] = "#define STREAMING_LOD_USED\n";
 		actions.usage_defines["BONE_INDICES"] = "#define BONES_USED\n";
 		actions.usage_defines["BONE_WEIGHTS"] = "#define WEIGHTS_USED\n";
 		actions.usage_defines["CUSTOM0"] = "#define CUSTOM0_USED\n";
@@ -1659,7 +1888,7 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.default_filter = ShaderLanguage::FILTER_LINEAR_MIPMAP;
 		actions.default_repeat = ShaderLanguage::REPEAT_ENABLE;
 		actions.global_buffer_array_variable = "global_shader_uniforms.data";
-		actions.instance_uniform_index_variable = "instances.data[instance_index_interp].instance_uniforms_ofs";
+		actions.instance_uniform_index_variable = "rt_instance_uniforms_ofs";
 
 		actions.check_multiview_samplers = RendererCompositorRD::get_singleton()->is_xr_enabled(); // Make sure we check sampling multiview textures.
 
@@ -1728,4 +1957,22 @@ bool SceneShaderRaytracing::is_advanced_shader_group_enabled(bool p_multiview) c
 uint32_t SceneShaderRaytracing::get_pipeline_compilations(RSE::PipelineSource p_source) {
 	MutexLock lock(SceneShaderRaytracing::singleton_mutex);
 	return pipeline_compilations[p_source];
+}
+
+void SceneShaderRaytracing::get_pipeline_group_counts(uint32_t p_flags, uint32_t &r_required, uint32_t &r_ready, uint32_t &r_failed) const {
+	r_required = hit_group_slots.size();
+	r_ready = 0;
+	r_failed = 0;
+	const PipelineBundle *bundle = pipeline_bundles.getptr(p_flags);
+	if (!bundle) {
+		return;
+	}
+	r_failed = bundle->build_failed ? 1 : 0;
+	for (uint32_t i = 0; i < hit_group_slots.size(); i++) {
+		if (hit_group_slots[i].state == HGState::Failed || (i < bundle->per_hg_states.size() && bundle->per_hg_states[i] == HGState::Failed)) {
+			r_failed++;
+		} else if (i < bundle->live_ready_mask.size() && bundle->live_ready_mask[i]) {
+			r_ready++;
+		}
+	}
 }

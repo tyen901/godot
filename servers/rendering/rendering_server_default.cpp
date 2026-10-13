@@ -149,7 +149,7 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 			String name = RSG::utilities->get_captured_timestamp_name(i);
 
 			if (name.begins_with("vp_")) {
-				RSG::viewport->handle_timestamp(name, time_cpu, time_gpu);
+				RSG::viewport->handle_timestamp(name, time_gpu, RSG::utilities->get_captured_timestamps_frame());
 			}
 
 			if (RSG::utilities->capturing_timestamps) {

@@ -280,6 +280,7 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 			case RDC::SHADER_STAGE_CLOSEST_HIT:
 			case RDC::SHADER_STAGE_MISS:
 			case RDC::SHADER_STAGE_INTERSECTION:
+			case RDC::SHADER_STAGE_CALLABLE:
 				pipeline_type = RDC::PIPELINE_TYPE_RAYTRACING;
 				break;
 			default:
@@ -300,14 +301,14 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 			ERR_FAIL_COND_V_MSG(spirv_size != 1, FAILED,
 					"Compute shaders can only receive one stage, dedicated to compute.");
 		}
-		if (stage == RDC::SHADER_STAGE_RAYGEN || stage == RDC::SHADER_STAGE_ANY_HIT || stage == RDC::SHADER_STAGE_CLOSEST_HIT || stage == RDC::SHADER_STAGE_MISS || stage == RDC::SHADER_STAGE_INTERSECTION) {
+		if (stage == RDC::SHADER_STAGE_RAYGEN || stage == RDC::SHADER_STAGE_ANY_HIT || stage == RDC::SHADER_STAGE_CLOSEST_HIT || stage == RDC::SHADER_STAGE_MISS || stage == RDC::SHADER_STAGE_INTERSECTION || stage == RDC::SHADER_STAGE_CALLABLE) {
 			reflection.pipeline_type = RDC::PIPELINE_TYPE_RAYTRACING;
 		}
 		// RT hit group stages (any_hit, closest_hit, intersection) may appear
 		// multiple times -- one per hit group in the pipeline.
 		bool is_rt_hit_stage = (stage == RDC::SHADER_STAGE_ANY_HIT ||
 				stage == RDC::SHADER_STAGE_CLOSEST_HIT ||
-				stage == RDC::SHADER_STAGE_INTERSECTION);
+				stage == RDC::SHADER_STAGE_INTERSECTION || stage == RDC::SHADER_STAGE_CALLABLE);
 		if (!is_rt_hit_stage) {
 			ERR_FAIL_COND_V_MSG(reflection.stages_bits.has_flag(stage_flag), FAILED,
 					"Stage " + String(RDC::SHADER_STAGE_NAMES[stage]) + " submitted more than once.");
@@ -322,7 +323,7 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 					RDC::SHADER_STAGE_ANY_HIT_BIT |
 					RDC::SHADER_STAGE_CLOSEST_HIT_BIT |
 					RDC::SHADER_STAGE_MISS_BIT |
-					RDC::SHADER_STAGE_INTERSECTION_BIT;
+					RDC::SHADER_STAGE_INTERSECTION_BIT | RDC::SHADER_STAGE_CALLABLE_BIT;
 		} else {
 			uniform_stage_flags = stage_flag;
 		}

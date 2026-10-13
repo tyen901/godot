@@ -43,6 +43,10 @@ namespace RendererRD {
 
 class MeshStorage : public RendererMeshStorage {
 public:
+	uint64_t get_rt_geometry_revision() const { return rt_geometry_revision.get(); }
+	uint64_t mesh_get_rt_revision(RID p_mesh) const;
+	uint64_t multimesh_get_rt_revision(RID p_multimesh) const;
+
 	enum DefaultRDBuffer {
 		DEFAULT_RD_BUFFER_VERTEX,
 		DEFAULT_RD_BUFFER_NORMAL,
@@ -65,6 +69,7 @@ public:
 
 private:
 	static MeshStorage *singleton;
+	SafeNumeric<uint64_t> rt_geometry_revision{1};
 
 	RID default_rd_storage_buffer;
 
@@ -75,6 +80,7 @@ private:
 	struct MeshInstance;
 
 	struct Mesh {
+		SafeNumeric<uint64_t> rt_revision{1};
 		struct Surface {
 			RSE::PrimitiveType primitive = RSE::PRIMITIVE_POINTS;
 			uint64_t format = 0;
@@ -229,6 +235,7 @@ private:
 	/* MultiMesh */
 
 	struct MultiMesh {
+		SafeNumeric<uint64_t> rt_revision{1};
 		RID mesh;
 		int instances = 0;
 		RSE::MultimeshTransformFormat xform_format = RSE::MULTIMESH_TRANSFORM_3D;

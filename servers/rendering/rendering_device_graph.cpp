@@ -813,7 +813,7 @@ void RenderingDeviceGraph::_run_raytracing_list_command(RDD::CommandBufferID p_c
 			} break;
 			case RaytracingListInstruction::TYPE_TRACE_RAYS: {
 				const RaytracingListTraceRaysInstruction *trace_rays_instruction = reinterpret_cast<const RaytracingListTraceRaysInstruction *>(instruction);
-				driver->command_trace_rays(p_command_buffer, trace_rays_instruction->raygen_sbt, trace_rays_instruction->miss_sbt, trace_rays_instruction->hit_sbt, trace_rays_instruction->width, trace_rays_instruction->height, trace_rays_instruction->depth);
+				driver->command_trace_rays(p_command_buffer, trace_rays_instruction->raygen_sbt, trace_rays_instruction->miss_sbt, trace_rays_instruction->hit_sbt, trace_rays_instruction->callable_sbt, trace_rays_instruction->width, trace_rays_instruction->height, trace_rays_instruction->depth);
 				instruction_data_cursor += sizeof(RaytracingListTraceRaysInstruction);
 			} break;
 			case RaytracingListInstruction::TYPE_SET_PUSH_CONSTANT: {
@@ -1840,7 +1840,7 @@ void RenderingDeviceGraph::add_blas_update(RDD::AccelerationStructureID p_accele
 	_add_command_to_graph(trackers.ptr(), usages.ptr(), usages.size(), command_index, command);
 }
 
-void RenderingDeviceGraph::add_tlas_build(RDD::AccelerationStructureID p_acceleration_structure, RDD::BufferID p_scratch_buffer, RDD::BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers) {
+void RenderingDeviceGraph::add_tlas_build(RDD::AccelerationStructureID p_acceleration_structure, RDD::BufferID p_scratch_buffer, RDD::BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers, ResourceTracker *p_instance_tracker) {
 	int32_t command_index;
 	RecordedTopLevelAccelerationStructureBuildCommand *command = static_cast<RecordedTopLevelAccelerationStructureBuildCommand *>(_allocate_command(sizeof(RecordedTopLevelAccelerationStructureBuildCommand), command_index));
 	command->type = RecordedCommand::TYPE_TOP_LEVEL_ACCELERATION_STRUCTURE_BUILD;
@@ -1855,7 +1855,7 @@ void RenderingDeviceGraph::add_tlas_build(RDD::AccelerationStructureID p_acceler
 	thread_local LocalVector<ResourceUsage> usages;
 
 	// Sources and destination.
-	uint32_t resource_count = p_src_trackers.size() + 1;
+	uint32_t resource_count = p_src_trackers.size() + 2;
 	trackers.resize(resource_count);
 	usages.resize(resource_count);
 
@@ -1864,6 +1864,8 @@ void RenderingDeviceGraph::add_tlas_build(RDD::AccelerationStructureID p_acceler
 		usages[i] = RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ;
 	}
 
+	trackers[resource_count - 2] = p_instance_tracker;
+	usages[resource_count - 2] = RESOURCE_USAGE_STORAGE_BUFFER_READ;
 	trackers[resource_count - 1] = p_dst_tracker;
 	usages[resource_count - 1] = RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE;
 
@@ -1989,12 +1991,13 @@ void RenderingDeviceGraph::add_raytracing_list_set_push_constant(RDD::ShaderID p
 	memcpy(instruction->data(), p_data, p_data_size);
 }
 
-void RenderingDeviceGraph::add_raytracing_list_trace_rays(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
+void RenderingDeviceGraph::add_raytracing_list_trace_rays(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, const RDD::ShaderBindingTable &p_callable_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
 	RaytracingListTraceRaysInstruction *instruction = reinterpret_cast<RaytracingListTraceRaysInstruction *>(_allocate_raytracing_list_instruction(sizeof(RaytracingListTraceRaysInstruction)));
 	instruction->type = RaytracingListInstruction::TYPE_TRACE_RAYS;
 	instruction->raygen_sbt = p_raygen_sbt;
 	instruction->miss_sbt = p_miss_sbt;
 	instruction->hit_sbt = p_hit_sbt;
+	instruction->callable_sbt = p_callable_sbt;
 	instruction->width = p_width;
 	instruction->height = p_height;
 	instruction->depth = p_depth;

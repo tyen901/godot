@@ -241,9 +241,15 @@ public:
 	FUNC1RC(Vector<Ref<Image>>, texture_3d_get, RID)
 
 	FUNC1(texture_drawable_generate_mipmaps, RID)
-	FUNC0RC(RID, texture_drawable_get_default_material)
+	// Initialized before resource loading and immutable until renderer teardown.
+	// DrawableTexture2D construction on a loader worker must not synchronously
+	// wait for the render thread, which may itself await shader worker tasks.
+	virtual RID texture_drawable_get_default_material() const override {
+		return RSG::texture_storage->texture_drawable_get_default_material();
+	}
 
 	FUNC2(texture_replace, RID, RID)
+	FUNC2(texture_replace_compatible, RID, RID)
 
 	FUNC3(texture_set_size_override, RID, int, int)
 // FIXME: Disabled during Vulkan refactoring, should be ported.
@@ -266,6 +272,8 @@ public:
 	FUNCRIDTEX2(texture_rd, const RID &, const RSE::TextureLayeredType)
 	FUNC2RC(RID, texture_get_rd_texture, RID, bool)
 	FUNC2RC(uint64_t, texture_get_native_handle, RID, bool)
+
+	FUNC2(texture_2d_attach_streaming_state, RID, RID);
 
 	/* SHADER API */
 
@@ -577,6 +585,8 @@ public:
 	FUNC4(decal_set_distance_fade, RID, bool, float, float)
 	FUNC3(decal_set_fade, RID, float, float)
 	FUNC2(decal_set_normal_fade, RID, float)
+	FUNC2(decal_set_material, RID, RID)
+	FUNC2(decal_set_instance_custom, RID, const Vector4 &)
 
 	/* BAKED LIGHT API */
 

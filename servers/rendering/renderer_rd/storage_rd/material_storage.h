@@ -109,6 +109,7 @@ public:
 		//to be used internally by update_parameters, in the most common configuration of material parameters
 		bool update_parameters_uniform_set(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty, const HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> &p_uniforms, const uint32_t *p_uniform_offsets, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, const HashMap<StringName, HashMap<int, RID>> &p_default_texture_params, uint32_t p_ubo_size, RID &r_uniform_set, RID p_shader, uint32_t p_shader_uniform_set, bool p_use_linear_color, bool p_3d_material);
 		void free_parameters_uniform_set(RID p_uniform_set);
+		RID material_feedback_rid;
 
 	private:
 		friend class MaterialStorage;
@@ -190,6 +191,10 @@ public:
 
 private:
 	static MaterialStorage *singleton;
+	SafeNumeric<uint64_t> rt_material_revision{1};
+	Mutex rt_material_candidates_mutex;
+	HashSet<RID> rt_material_candidates;
+	HashMap<RID, uint32_t> rt_geometry_materials;
 
 	/* Samplers */
 
@@ -309,7 +314,7 @@ private:
 		RID next_pass;
 		SelfList<Material> update_element;
 
-		uint16_t rt_invalidation_counter = 0; ///< Bump on param changes for RT cache invalidation.
+		uint64_t rt_invalidation_counter = 0; ///< Bump on param changes for RT cache invalidation.
 
 		Dependency dependency;
 
@@ -518,6 +523,11 @@ public:
 	virtual void material_set_param(RID p_material, const StringName &p_param, const Variant &p_value) override;
 	virtual Variant material_get_param(RID p_material, const StringName &p_param) const override;
 
+	// One uniform's std140 bytes as update_uniform_buffer writes them (the value,
+	// else the shader default, else the type's zero), for a material buffer built
+	// outside MaterialData: the ray tracer's material slot.
+	static void fill_std140_uniform(const ShaderLanguage::ShaderNode::Uniform &p_uniform, const Variant &p_value, uint8_t *r_data, bool p_use_linear_color);
+
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
 	virtual void material_set_render_priority(RID p_material, int priority) override;
 
@@ -546,7 +556,18 @@ public:
 		}
 	}
 
-	_FORCE_INLINE_ uint16_t material_get_rt_invalidation_counter(RID p_material) const {
+	_FORCE_INLINE_ uint32_t num_materials() const {
+		return material_owner.get_rid_count();
+	}
+
+	void queue_raytracing_material(RID p_material);
+	void reference_raytracing_material(RID p_material);
+	void unreference_raytracing_material(RID p_material);
+	void prepare_raytracing_materials(bool p_all_geometry = false);
+	void register_raytracing_material(RID p_material);
+	uint64_t get_rt_material_revision() const { return rt_material_revision.get(); }
+
+	_FORCE_INLINE_ uint64_t material_get_rt_invalidation_counter(RID p_material) const {
 		Material *material = material_owner.get_or_null(p_material);
 		if (!material) {
 			return 0;

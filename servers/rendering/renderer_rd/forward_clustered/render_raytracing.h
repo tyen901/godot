@@ -33,6 +33,7 @@
 #include "core/math/transform_3d.h"
 #include "core/string/string_name.h"
 #include "core/templates/hash_map.h"
+#include "core/templates/hash_set.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "core/templates/vector.h"
@@ -57,7 +58,7 @@ namespace RendererSceneRenderImplementation {
 class RenderForwardClustered;
 class SceneShaderRaytracing;
 
-// Must match GLSL GeometryData (std430, 128 bytes).
+// Must match GLSL GeometryData (std430, 160 bytes).
 struct alignas(16) RT_GeometryData {
 	uint64_t vertex_buffer_address;
 	uint64_t attribute_buffer_address;
@@ -84,9 +85,13 @@ struct alignas(16) RT_GeometryData {
 	// For deformed geometry: previous-frame position buffer used for motion vectors.
 	uint32_t prev_vertex_buffer_address_lo;
 	uint32_t prev_vertex_buffer_address_hi;
-	uint32_t _pad[5];
+	uint32_t custom_attribute[4]; // Byte offset in low 28 bits; Godot custom format in high 4.
+	uint32_t instance_uniforms_ofs; // Native per-instance global uniform buffer offset.
+	float instance_custom[4];
+	uint32_t layer_mask = 0;
+	uint32_t decal_pad[3] = {};
 };
-static_assert(sizeof(RT_GeometryData) == 128, "RT_GeometryData must be 128 bytes for std430");
+static_assert(sizeof(RT_GeometryData) == 160, "RT_GeometryData must be 160 bytes for std430");
 
 /// Per-instance motion data for velocity computation (matches GLSL InstanceMotionData, 48 bytes).
 struct RT_InstanceMotionData {
@@ -94,7 +99,7 @@ struct RT_InstanceMotionData {
 };
 static_assert(sizeof(RT_InstanceMotionData) == 48, "RT_InstanceMotionData must be 48 bytes");
 
-// Must match GLSL MaterialData (std430, 96 bytes).
+// Must match GLSL MaterialData (std430, 112 bytes).
 struct alignas(16) RT_MaterialData {
 	uint32_t albedo_texture_idx;
 	uint32_t normal_texture_idx;
@@ -112,8 +117,10 @@ struct alignas(16) RT_MaterialData {
 	float normal_map_depth; // Strength [0..N], default 1.0 (not Z-depth).
 	float specular; // Dielectric specular [0..1], default 0.5 -> F0 = 0.04.
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none).
+	uint32_t material_feedback_index = UINT32_MAX;
+	uint32_t material_feedback_pad[3] = {};
 };
-static_assert(sizeof(RT_MaterialData) == 96, "RT_MaterialData must be 96 bytes for std430");
+static_assert(sizeof(RT_MaterialData) == 112, "RT_MaterialData must be 112 bytes for std430");
 
 // Light types for raytracing (matches GLSL RT_LIGHT_TYPE_* defines).
 enum RTLightType : uint32_t {
@@ -121,6 +128,8 @@ enum RTLightType : uint32_t {
 	RT_LIGHT_TYPE_DIRECTIONAL = 1,
 	RT_LIGHT_TYPE_SPOT = 3,
 };
+
+enum { RT_LIGHT_SHADOW_ENABLED = 1u };
 
 // Must match GLSL RTLightData (std430, 80 bytes).
 struct alignas(16) RT_LightData {
@@ -135,7 +144,7 @@ struct alignas(16) RT_LightData {
 	float indirect_energy;
 	float inv_spot_attenuation;
 	float cos_spot_angle;
-	float _pad0;
+	uint32_t flags; // Native light flags; preserves std430 layout.
 	float spot_direction[3];
 	float _pad1;
 };
@@ -212,6 +221,7 @@ struct RTMaterialData {
 	uint32_t rt_sbt_offset = 0;
 	bool is_custom_shader = false;
 	RID uniform_buffer; // Buffer pointer for mats > 512 bytes.
+	uint32_t uniform_buffer_size = 0;
 	uint32_t uniform_pool_slot = UINT32_MAX; // Index into the material UBO pool, or UINT32_MAX (unused)
 	RID albedo_texture_rd;
 	RID normal_texture_rd;
@@ -228,6 +238,23 @@ struct RTCacheEntry {
 	uint64_t size_bytes = 0;
 };
 
+struct RTSurfaceKey {
+	RID mesh;
+	uint32_t surface = 0;
+	uint32_t lod = 0;
+	bool operator==(const RTSurfaceKey &p_other) const {
+		return mesh == p_other.mesh && surface == p_other.surface && lod == p_other.lod;
+	}
+};
+
+struct RTSurfaceKeyHasher {
+	static uint32_t hash(const RTSurfaceKey &p_key) {
+		uint32_t h = hash_murmur3_one_64(p_key.mesh.get_id());
+		h = hash_murmur3_one_32(p_key.surface, h);
+		return hash_fmix32(hash_murmur3_one_32(p_key.lod, h));
+	}
+};
+
 /// BLAS cache entry for a surface driven by a per-frame-deformed vertex buffer.
 ///
 /// The skinned vertex buffer is owned by the engine's MeshInstance system and may
@@ -240,13 +267,16 @@ struct RTCacheEntry {
 ///     motion-vector path. Updated from owned_vb_full's position section each frame
 ///     before owned_vb_full is overwritten with the new skinned data.
 struct RTDeformedCacheEntry {
-	RTSurfaceData *ptr = nullptr;
+	struct LODVariant {
+		RTSurfaceData *ptr = nullptr;
+		uint64_t change_stamp = 0;
+	};
+	HashMap<uint32_t, LODVariant> lods;
 	uint32_t last_used_frame = 0;
 	uint64_t cached_change_stamp = 0;
 	uint32_t cached_key_version = 0;
 	uint32_t cached_surface_counter = 0;
 	uint64_t cached_buffer_id = 0; // RID id of the deformed vertex buffer at the time of build.
-	bool blas_built_once = false; // True once the BLAS has been fully built; subsequent ticks can refit.
 
 	RID owned_vb_full;
 	uint32_t owned_vb_full_capacity = 0; // Bytes; grow-only.
@@ -278,7 +308,9 @@ struct RTMergedMMEntry {
 	uint32_t last_mm_count = 0;
 	uint32_t last_surface_counter = 0;
 	uint32_t last_used_frame = 0;
-	uint64_t cached_mm_last_change = 0;
+	uint64_t cached_mm_revision = 0;
+	RID cached_source_mesh;
+	uint64_t cached_source_mesh_revision = 0;
 	bool blas_built_once = false;
 	bool indexed = false; // selects MODE_INDEXED vs MODE_NON_INDEXED variant
 };
@@ -286,7 +318,7 @@ struct RTMergedMMEntry {
 struct RTMaterialCacheEntry {
 	RTMaterialData *ptr = nullptr;
 	uint32_t last_used_frame = 0;
-	uint16_t cached_counter = 0;
+	uint64_t cached_counter = 0;
 	uint32_t cached_rid_version = 0;
 };
 
@@ -301,7 +333,63 @@ struct RTMaterialCacheEntry {
 /// Lifetime is tied to a `RenderSceneBuffersRD`: created lazily on first
 /// `build_tlas` for that viewport, freed via `RenderRaytracing::free_viewport_state`
 /// from `RenderBufferDataForwardClustered::free_data()`.
+struct RTSceneInput {
+	uint64_t instance = 0;
+	uint64_t revision = 0;
+};
+struct RTSceneMaterial {
+	uint64_t revision = 0;
+	uint32_t sbt = 0;
+	RT_MaterialData data = {};
+};
+
+struct alignas(16) RT_DecalData {
+	float model[16], inverse_model[16], instance_custom[4], modulate[4], fades[4], parameters[4];
+	uint32_t textures[4];
+	uint64_t uniform_address = 0;
+	uint32_t callable_index = UINT32_MAX;
+	uint32_t cull_mask = 0;
+	uint32_t material_feedback_index = UINT32_MAX;
+	uint32_t material_feedback_pad[3] = {};
+};
+static_assert(sizeof(RT_DecalData) == 240);
+
 struct RTViewportState {
+	RID decal_tlas, decal_buffer;
+	uint32_t decal_tlas_capacity = 0, decal_buffer_capacity = 0;
+	uint64_t cached_decal_revision = UINT64_MAX, cached_decal_material_revision = UINT64_MAX, cached_decal_pipeline_generation = UINT64_MAX;
+	LocalVector<RID> cached_decals;
+	HashMap<RID, uint32_t> cached_decal_feedback_indices;
+	LocalVector<uint8_t> cached_decal_transforms;
+	bool decal_distance_fade = false;
+	Vector3 cached_decal_camera;
+
+	// Exact scene submission identity, per viewport. Camera/light uniforms and
+	// animated material UBOs are updated independently of these static tables.
+	LocalVector<RTSceneInput> cached_scene_inputs;
+	HashMap<uint64_t, uint64_t> cached_input_revisions;
+	struct LODSurface { const void *surface; uint32_t lod; };
+	LocalVector<LODSurface> lod_surfaces;
+	struct SurfaceRange {
+		uint32_t first = 0, count = 0, flags = 0, sbt = 0, primitives = 0;
+		bool merged = false;
+		RID merged_handle;
+		uint32_t lod = 0;
+	};
+	HashMap<const void *, SurfaceRange> surface_ranges;
+	LocalVector<RTSurfaceKey> cached_surface_keys;
+	HashMap<RID, RTSceneMaterial> cached_materials;
+	HashMap<RID, uint64_t> cached_mesh_revisions;
+	HashMap<RID, uint64_t> cached_multimesh_revisions;
+	uint64_t cached_geometry_revision = 0;
+	uint64_t cached_material_revision = 0;
+	uint64_t cached_pipeline_generation = 0;
+	uint32_t cached_rt_flags = 0;
+	LocalVector<RID> cached_merged_handles;
+	uint32_t cached_instance_count = 0;
+	uint32_t cached_primitive_count = 0;
+	bool scene_cached = false;
+	uint32_t cached_shader_pending_omissions = 0;
 	RID tlas;
 	uint32_t tlas_max_instances = 0;
 
@@ -330,9 +418,15 @@ class RenderRaytracing {
 	BindlessBlock *bindless_block = nullptr;
 
 	RID bindless_uniform_set;
+	RID decal_unit_buffer, decal_unit_blas;
+	void update_decals(const RenderDataRD *p_render_data, RTViewportState *p_state, uint32_t p_rt_flags);
 
 	// Caching (chunked sparse caches indexed by RID low bits / 256).
-	Vector<RTCacheEntry *> surface_chunks;
+	bool texture_streaming_enabled = false;
+	uint32_t _get_material_feedback_index(RID p_material) const;
+
+	HashMap<RTSurfaceKey, RTCacheEntry, RTSurfaceKeyHasher> surface_cache;
+	HashSet<RTSurfaceKey, RTSurfaceKeyHasher> surface_active_this_frame;
 	Vector<RTMaterialCacheEntry *> material_chunks;
 
 	// Merged MultiMesh BLAS cache and compute shader.
@@ -349,15 +443,19 @@ class RenderRaytracing {
 	} mm_merge_shader;
 
 	struct MMSurfaceHandles {
-		LocalVector<RID> per_surface; // Grown on demand; entry per touched surface index.
+		LocalVector<LocalVector<RID>> per_surface; // Native surface and LOD variants.
 		uint32_t mm_validator = 0; // High 32 bits of MM RID id at last access.
 
 		// Resolve / grow storage for `p_surface_index`.
-		RID &surface_handle(uint32_t p_surface_index) {
+		RID &surface_handle(uint32_t p_surface_index, uint32_t p_lod) {
 			if (p_surface_index >= per_surface.size()) {
 				per_surface.resize(p_surface_index + 1);
 			}
-			return per_surface[p_surface_index];
+			LocalVector<RID> &lods = per_surface[p_surface_index];
+			if (p_lod >= lods.size()) {
+				lods.resize(p_lod + 1);
+			}
+			return lods[p_lod];
 		}
 	};
 	LocalVector<MMSurfaceHandles> mm_handles;
@@ -378,6 +476,8 @@ class RenderRaytracing {
 	uint32_t cache_misses = 0;
 
 	// Per-frame scratch arrays.
+	LocalVector<RTSceneInput> scene_inputs;
+	HashMap<RID, RTSceneMaterial> scene_materials;
 	LocalVector<RT_GeometryData> geometry_data;
 	LocalVector<RT_MaterialData> material_data;
 	LocalVector<int32_t> motion_indices; ///< Per-instance: index into motion_transforms[], or -1.
@@ -411,21 +511,24 @@ class RenderRaytracing {
 	// Cache helpers.
 	static uint32_t get_rid_index(RID p_rid);
 	static uint32_t get_rid_version(RID p_rid);
-	RTCacheEntry *get_surface_cache_entry(uint32_t p_index);
 	RTMaterialCacheEntry *get_material_cache_entry(uint32_t p_index);
 	uint32_t allocate_material_slot();
+
+	uint32_t _select_surface_lod(const void *p_instance, void *p_surface, const RenderDataRD *p_render_data) const;
 
 	// Internal methods.
 	RTSurfaceData *process_surface(
 			const void *p_surf,
 			void *p_mesh_surface,
 			uint32_t p_surface_invalidation_counter,
+			uint32_t p_lod,
 			const Transform3D &p_transform,
 			LocalVector<RID> &r_dirty_blas_list);
 	RTSurfaceData *process_deformed_surface(
 			const void *p_surf,
 			void *p_mesh_surface,
 			const struct RTDeformedGeometrySource &p_source,
+			uint32_t p_lod,
 			LocalVector<RID> &r_dirty_blas_list,
 			LocalVector<RID> &r_dirty_blas_update_list);
 	void _populate_surface_blas(
@@ -435,22 +538,24 @@ class RenderRaytracing {
 			bool p_prefer_fast_build,
 			bool p_allow_update,
 			uint32_t p_cache_key,
+			uint32_t p_lod,
 			RTSurfaceData *r_surf_data,
 			LocalVector<RID> &r_dirty_blas_list);
-	RTMaterialData *process_material(RID p_material_rid, uint16_t p_material_invalidation_counter);
+	RTMaterialData *process_material(RID p_material_rid, uint64_t p_material_invalidation_counter);
 	bool _build_merged_mm_blas(
 			RID p_mm_rid,
 			RID p_mm_gpu_buffer,
 			void *p_mesh_surface,
 			uint32_t p_mm_count,
 			uint32_t p_surface_index,
+			uint32_t p_lod,
 			uint32_t p_surface_counter,
 			RD::ComputeListID p_compute_list,
 			LocalVector<RID> &r_dirty_blas_list,
 			LocalVector<RID> &r_dirty_blas_update_list,
 			RTSurfaceData *r_surf_data);
 	void update_procedural_blas(RTProceduralState *p_state, LocalVector<RID> &r_dirty_blas_list);
-	void build_acceleration_structures(RTViewportState *p_state, const LocalVector<RID> &p_dirty_blas_list, const LocalVector<RID> &p_dirty_blas_update_list);
+	Error build_acceleration_structures(RTViewportState *p_state, const LocalVector<RID> &p_dirty_blas_list, const LocalVector<RID> &p_dirty_blas_update_list);
 	void finalize_buffers(RTViewportState *p_state);
 	void prepare_frame();
 

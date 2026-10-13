@@ -820,7 +820,7 @@ public:
 		uint32_t intersection_shader_index = UINT32_MAX;
 	};
 
-	virtual RaytracingPipelineID raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) = 0;
+	virtual RaytracingPipelineID raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, VectorView<uint32_t> p_callable_shader_indices, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) = 0;
 	virtual void raytracing_pipeline_free(RaytracingPipelineID p_pipeline) = 0;
 
 	virtual bool raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data, uint32_t p_data_stride_bytes) = 0;
@@ -842,7 +842,7 @@ public:
 		uint32_t size = 0;
 	};
 
-	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) = 0;
+	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, const ShaderBindingTable &p_callable_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) = 0;
 
 	/******************/
 	/**** CALLBACK ****/

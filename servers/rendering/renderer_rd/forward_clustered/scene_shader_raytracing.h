@@ -321,6 +321,8 @@ public:
 	}
 
 	static SceneShaderRaytracing *get_singleton();
+	static SceneShaderRaytracing *get_existing_singleton() { return singleton; }
+	static uint32_t uniform_std140_size(const ShaderLanguage::ShaderNode::Uniform &p_uniform);
 
 	struct MaterialData : public RendererRD::MaterialStorage::MaterialData {
 		ShaderData *shader_data = nullptr;
@@ -363,6 +365,9 @@ public:
 		HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniforms;
 		Vector<TextureUniformInfo> texture_uniforms; // Sampler2D packed as bindless indices after UBO
 		bool uses_alpha_clip = false; // Writes ALPHA_SCISSOR_THRESHOLD; needs per-HG any-hit
+		bool is_decal = false;
+		bool decal_blend_mul = false;
+		uint32_t callable_index = UINT32_MAX;
 		bool is_procedural = false; // Uses intersection shader instead of triangle geometry
 		uint32_t alpha_texture_buffer_offset = UINT32_MAX; // Byte offset of hint_alpha texture index in CustomMaterialUniforms UBO; UINT32_MAX if absent
 	};
@@ -396,7 +401,9 @@ public:
 		CustomShaderEntry entry;
 	};
 
+	SafeNumeric<uint64_t> shader_registry_revision{0};
 	LocalVector<HitGroupSlot> hit_group_slots;
+	uint32_t decal_callable_count = 0;
 	HashMap<SourceHash128, uint32_t, SourceHash128Hasher> source_hash_to_slot;
 
 	// One RD RT pipeline variant (rt_flags key). Owns base + per-slot HG shaders (RG+miss baked in per HG).
@@ -412,12 +419,25 @@ public:
 		// Baked into current pipeline (TLAS skip / is_hg_ready_in_bundle).
 		LocalVector<bool> live_ready_mask;
 		uint32_t live_hg_count = 0;
+		uint64_t generation = 0;
 
 		bool dirty = false;
 		bool initial_pipeline_built = false;
+		bool prepared_batch = false;
+		bool build_failed = false;
+		bool retried_snapshot = false;
+		uint64_t loading_barrier = 0;
+		uint64_t cohort_complete_frame = 0;
 	};
 
 	HashMap<uint32_t, PipelineBundle> pipeline_bundles;
+
+public:
+	bool is_active() const { return !pipeline_bundles.is_empty(); }
+	uint64_t get_pipeline_generation(uint32_t p_flags) const {
+		const PipelineBundle *bundle = pipeline_bundles.getptr(p_flags);
+		return bundle ? bundle->generation : 0;
+	}
 
 	// Single-lane async bundle rebuild (worker: SPIR-V + raytracing_pipeline_create; main: SBT + swap).
 	struct PipelineBuildTask;
@@ -433,6 +453,7 @@ public:
 	const CustomShaderEntry *get_custom_shader_entry(uint32_t p_slot_index) const;
 	uint32_t get_hit_group_slot_count() const { return hit_group_slots.size(); }
 
+	void get_pipeline_group_counts(uint32_t p_flags, uint32_t &r_required, uint32_t &r_ready, uint32_t &r_failed) const;
 	bool is_hg_ready_in_bundle(uint32_t p_slot_index, uint32_t p_rt_flags) const;
 	void drain_completed_compiles();
 	void finalize_custom_shaders();
@@ -473,6 +494,8 @@ private:
 		Vector<RD::ShaderStageSPIRVData> base_non_hit_stages; // RAYGEN + MISS spirv.
 		RD::ShaderStageSPIRVData base_any_hit_stage; // Used when slot doesn't override AH.
 		bool base_any_hit_valid = false;
+		Vector<RD::ShaderStageSPIRVData> base_stages;
+		String callable_template;
 		String ch_template; // Template GLSL with /* RT_CUSTOM_* */ markers.
 		String ah_template;
 		String is_template;

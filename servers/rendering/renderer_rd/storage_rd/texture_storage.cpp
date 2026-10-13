@@ -2052,7 +2052,11 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 	Vector<RID> proxies_to_update = tex->proxies;
 	Vector<RID> proxies_to_redirect = by_tex->proxies;
 
+	RID streaming_state = tex->streaming_state;
+
 	*tex = *by_tex;
+
+	tex->streaming_state = streaming_state; // restore streaming state
 
 	tex->proxies = proxies_to_update; //restore proxies, so they can be updated
 
@@ -2071,6 +2075,66 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 
 	decal_atlas_mark_dirty_on_texture(p_texture);
 	area_light_atlas_mark_dirty_on_texture(p_texture);
+}
+
+void TextureStorage::texture_replace_compatible(RID p_texture, RID p_by_texture) {
+	Texture *tex = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL(tex);
+	ERR_FAIL_COND(tex->proxy_to.is_valid()); //can't replace proxy
+	Texture *by_tex = texture_owner.get_or_null(p_by_texture);
+	ERR_FAIL_NULL(by_tex);
+	ERR_FAIL_COND(by_tex->proxy_to.is_valid()); //can't replace proxy
+
+	if (tex == by_tex) {
+		return;
+	}
+
+	RID old_rd_texture = tex->rd_texture;
+	RID old_rd_texture_srgb = tex->rd_texture_srgb;
+	RID new_rd_texture = by_tex->rd_texture;
+	RID new_rd_texture_srgb = by_tex->rd_texture_srgb;
+
+	if (tex->canvas_texture) {
+		memdelete(tex->canvas_texture);
+		tex->canvas_texture = nullptr;
+	}
+
+	Vector<RID> proxies_to_update = tex->proxies;
+	Vector<RID> proxies_to_redirect = by_tex->proxies;
+
+	RID streaming_state = tex->streaming_state;
+	*tex = *by_tex;
+	tex->streaming_state = streaming_state;
+
+	tex->proxies = proxies_to_update; //restore proxies, so they can be updated
+
+	if (tex->canvas_texture) {
+		tex->canvas_texture->diffuse = p_texture; //update
+	}
+
+	for (int i = 0; i < proxies_to_update.size(); i++) {
+		texture_proxy_update(proxies_to_update[i], p_texture);
+	}
+	for (int i = 0; i < proxies_to_redirect.size(); i++) {
+		texture_proxy_update(proxies_to_redirect[i], p_texture);
+	}
+
+	// Replace RD-level textures: patches uniform sets and defers old resources.
+	if (old_rd_texture_srgb.is_valid() && old_rd_texture_srgb != new_rd_texture_srgb) {
+		if (new_rd_texture_srgb.is_valid()) {
+			RD::get_singleton()->texture_replace_rid(old_rd_texture_srgb, new_rd_texture_srgb);
+		} else {
+			RD::get_singleton()->free_rid(old_rd_texture_srgb);
+		}
+	}
+	if (old_rd_texture != new_rd_texture) {
+		RD::get_singleton()->texture_replace_rid(old_rd_texture, new_rd_texture);
+	}
+
+	//delete last, so proxies can be updated
+	texture_owner.free(p_by_texture);
+
+	decal_atlas_mark_dirty_on_texture(p_texture);
 }
 
 void TextureStorage::texture_set_size_override(RID p_texture, int p_width, int p_height) {
@@ -3686,10 +3750,12 @@ RID TextureStorage::decal_allocate() {
 }
 
 void TextureStorage::decal_initialize(RID p_decal) {
+	rt_decal_revision++;
 	decal_owner.initialize_rid(p_decal, Decal());
 }
 
 void TextureStorage::decal_free(RID p_rid) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_rid);
 	for (int i = 0; i < RSE::DECAL_TEXTURE_MAX; i++) {
 		if (decal->textures[i].is_valid() && owns_texture(decal->textures[i])) {
@@ -3700,7 +3766,57 @@ void TextureStorage::decal_free(RID p_rid) {
 	decal_owner.free(p_rid);
 }
 
+void TextureStorage::decal_set_instance_custom(RID p_decal, const Vector4 &p_custom) {
+	Decal *decal = decal_owner.get_or_null(p_decal);
+	ERR_FAIL_NULL(decal);
+	decal->instance_custom = p_custom;
+	rt_decal_revision++;
+	decal->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_DECAL);
+}
+
+void TextureStorage::decal_set_material(RID p_decal, RID p_material) {
+	Decal *decal = decal_owner.get_or_null(p_decal);
+	ERR_FAIL_NULL(decal);
+	if (decal->material == p_material) {
+		return;
+	}
+	decal->material = p_material;
+	rt_decal_revision++;
+	decal->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_DECAL);
+}
+
+bool TextureStorage::decal_instance_get_rt_data(RID p_instance, RTDecal &r_data) const {
+	const DecalInstance *instance = decal_instance_owner.get_or_null(p_instance);
+	if (!instance) {
+		return false;
+	}
+	const Decal *decal = decal_owner.get_or_null(instance->decal);
+	if (!decal) {
+		return false;
+	}
+	r_data.material = decal->material;
+	r_data.instance_custom = decal->instance_custom;
+	for (int i = 0; i < RSE::DECAL_TEXTURE_MAX; i++) {
+		r_data.textures[i] = decal->textures[i];
+	}
+	r_data.transform = instance->transform;
+	r_data.size = decal->size;
+	r_data.modulate = decal->modulate;
+	r_data.cull_mask = decal->cull_mask;
+	r_data.sorting_offset = instance->sorting_offset;
+	r_data.albedo_mix = decal->albedo_mix;
+	r_data.emission_energy = decal->emission_energy;
+	r_data.upper_fade = decal->upper_fade;
+	r_data.lower_fade = decal->lower_fade;
+	r_data.normal_fade = decal->normal_fade;
+	r_data.distance_fade = decal->distance_fade;
+	r_data.distance_fade_begin = decal->distance_fade_begin;
+	r_data.distance_fade_length = decal->distance_fade_length;
+	return true;
+}
+
 void TextureStorage::decal_set_size(RID p_decal, const Vector3 &p_size) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	decal->size = p_size;
@@ -3708,6 +3824,7 @@ void TextureStorage::decal_set_size(RID p_decal, const Vector3 &p_size) {
 }
 
 void TextureStorage::decal_set_texture(RID p_decal, RSE::DecalTexture p_type, RID p_texture) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	ERR_FAIL_INDEX(p_type, RSE::DECAL_TEXTURE_MAX);
@@ -3732,24 +3849,28 @@ void TextureStorage::decal_set_texture(RID p_decal, RSE::DecalTexture p_type, RI
 }
 
 void TextureStorage::decal_set_emission_energy(RID p_decal, float p_energy) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	decal->emission_energy = p_energy;
 }
 
 void TextureStorage::decal_set_albedo_mix(RID p_decal, float p_mix) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	decal->albedo_mix = p_mix;
 }
 
 void TextureStorage::decal_set_modulate(RID p_decal, const Color &p_modulate) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	decal->modulate = p_modulate;
 }
 
 void TextureStorage::decal_set_cull_mask(RID p_decal, uint32_t p_layers) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	decal->cull_mask = p_layers;
@@ -3757,6 +3878,7 @@ void TextureStorage::decal_set_cull_mask(RID p_decal, uint32_t p_layers) {
 }
 
 void TextureStorage::decal_set_distance_fade(RID p_decal, bool p_enabled, float p_begin, float p_length) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	decal->distance_fade = p_enabled;
@@ -3765,6 +3887,7 @@ void TextureStorage::decal_set_distance_fade(RID p_decal, bool p_enabled, float 
 }
 
 void TextureStorage::decal_set_fade(RID p_decal, float p_above, float p_below) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	decal->upper_fade = p_above;
@@ -3772,6 +3895,7 @@ void TextureStorage::decal_set_fade(RID p_decal, float p_above, float p_below) {
 }
 
 void TextureStorage::decal_set_normal_fade(RID p_decal, float p_fade) {
+	rt_decal_revision++;
 	Decal *decal = decal_owner.get_or_null(p_decal);
 	ERR_FAIL_NULL(decal);
 	decal->normal_fade = p_fade;
@@ -4049,18 +4173,21 @@ RID TextureStorage::decal_instance_create(RID p_decal) {
 }
 
 void TextureStorage::decal_instance_free(RID p_decal_instance) {
+	rt_decal_revision++;
 	DecalInstance *di = decal_instance_owner.get_or_null(p_decal_instance);
 	ForwardIDStorage::get_singleton()->free_forward_id(FORWARD_ID_TYPE_DECAL, di->forward_id);
 	decal_instance_owner.free(p_decal_instance);
 }
 
 void TextureStorage::decal_instance_set_transform(RID p_decal_instance, const Transform3D &p_transform) {
+	rt_decal_revision++;
 	DecalInstance *di = decal_instance_owner.get_or_null(p_decal_instance);
 	ERR_FAIL_NULL(di);
 	di->transform = p_transform;
 }
 
 void TextureStorage::decal_instance_set_sorting_offset(RID p_decal_instance, float p_sorting_offset) {
+	rt_decal_revision++;
 	DecalInstance *di = decal_instance_owner.get_or_null(p_decal_instance);
 	ERR_FAIL_NULL(di);
 	di->sorting_offset = p_sorting_offset;
@@ -5362,4 +5489,10 @@ uint32_t TextureStorage::render_target_get_color_usage_bits(bool p_msaa) {
 		// FIXME: Storage bit should only be requested when FSR is required.
 		return RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
 	}
+}
+
+void TextureStorage::texture_2d_attach_streaming_state(RID p_texture, RID p_streaming_state) {
+	Texture *tex = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_MSG(tex, "Invalid texture RID.");
+	tex->streaming_state = p_streaming_state;
 }

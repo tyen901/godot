@@ -268,14 +268,21 @@ void main() {
 #endif
 
 #define GLSL 1
+#ifdef RT_DECAL_CALLABLE
+#define RT_STAGE_CALLABLE 1
+#else
 #define RT_STAGE_CLOSEST_HIT 1
-
-// clang-format off
+#endif
 #include "raytracing_inc.glsl"
 #include "../scene_data_inc.glsl"
-#include "brdf_inc.glsl"
 #include "raytracing_common_inc.glsl"
-// clang-format on
+#include "raytracing_samplers_inc.glsl"
+#include "raytracing_decal_data_inc.glsl"
+#include "raytracing_streaming_inc.glsl"
+#ifdef RT_DECAL_CALLABLE
+#include "raytracing_decal_callable_inc.glsl"
+#else
+#include "brdf_inc.glsl"
 
 #define attribs hit_attribs.bary_or_uv
 #define RT_HIT_ATTRIBS_DECLARED
@@ -302,6 +309,8 @@ layout(set = 0, binding = 5, std430) readonly buffer MaterialBuffer {
 	MaterialData materials[];
 };
 // clang-format on
+
+#include "raytracing_material_footprint_inc.glsl"
 
 #include "raytracing_lights_inc.glsl"
 
@@ -378,6 +387,7 @@ void main() {
 	m.alpha = alpha;
 	m.roughness = roughness;
 	m.metalness = metallic;
+	m.transmission = transmission;
 	m.specular = specular;
 	m.emissive = emission * scene_data_block.data.emissive_exposure_normalization;
 	m.normal = normalize(mat3(inv_view_matrix) * normal); // view space -> world space
@@ -408,6 +418,13 @@ void main() {
 	// HG0: StandardMaterial3D evaluation.
 	MaterialData mat = materials[h.geometry_idx];
 	vec2 uv = h.uv * mat.uv1_scale + mat.uv1_offset;
+#ifdef TEXTURE_STREAMING
+	if (mat.material_feedback_index != 0xffffffffu) {
+		rt_compute_material_footprint(h.geometry_idx, h.hit_pos);
+		rt_write_material_feedback(mat.material_feedback_index,
+				streaming_footprint_sq(rt_uv_ddx * mat.uv1_scale, rt_uv_ddy * mat.uv1_scale));
+	}
+#endif
 
 	// Normal mapping.
 	vec3 tangent_space_normal = vec3(0.0, 0.0, 1.0);
@@ -441,6 +458,7 @@ void main() {
 	m.specular = mat.specular;
 	m.emissive = emissive;
 	m.normal = final_normal;
+	m.transmission = 0.0;
 
 #ifdef RT_DEBUG_ENABLED
 	{
@@ -457,6 +475,7 @@ void main() {
 	shade_and_bounce(h, m);
 #endif
 }
+#endif // RT_DECAL_CALLABLE
 
 #[any_hit]
 
@@ -500,6 +519,8 @@ layout(set = 0, binding = 5, std430) readonly buffer MaterialBuffer {
 	MaterialData materials[];
 };
 // clang-format on
+
+#include "raytracing_material_footprint_inc.glsl"
 
 layout(set = 1, binding = 0) uniform texture2D bindless_textures[];
 

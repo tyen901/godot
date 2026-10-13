@@ -133,6 +133,7 @@ public:
 	virtual Vector<Ref<Image>> texture_3d_get(RID p_texture) const = 0;
 
 	virtual void texture_replace(RID p_texture, RID p_by_texture) = 0;
+	virtual void texture_replace_compatible(RID p_texture, RID p_by_texture) = 0;
 	virtual void texture_set_size_override(RID p_texture, int p_width, int p_height) = 0;
 
 	virtual void texture_set_path(RID p_texture, const String &p_path) = 0;
@@ -148,6 +149,9 @@ public:
 	virtual void texture_set_detect_roughness_callback(RID p_texture, RenderingServerTypes::TextureDetectRoughnessCallback p_callback, void *p_userdata) = 0;
 
 	virtual void texture_debug_usage(List<RenderingServerTypes::TextureInfo> *r_info) = 0;
+
+	virtual void texture_2d_attach_streaming_state(RID p_texture, RID p_streaming_state) = 0;
+
 	Array _texture_debug_usage_bind();
 
 	virtual void texture_set_force_redraw_if_visible(RID p_texture, bool p_enable) = 0;
@@ -385,6 +389,8 @@ public:
 	virtual void decal_set_distance_fade(RID p_decal, bool p_enabled, float p_begin, float p_length) = 0;
 	virtual void decal_set_fade(RID p_decal, float p_above, float p_below) = 0;
 	virtual void decal_set_normal_fade(RID p_decal, float p_fade) = 0;
+	virtual void decal_set_material(RID p_decal, RID p_material) = 0;
+	virtual void decal_set_instance_custom(RID p_decal, const Vector4 &p_custom) = 0;
 
 	virtual void decals_set_filter(RSE::DecalFilter p_quality) = 0;
 

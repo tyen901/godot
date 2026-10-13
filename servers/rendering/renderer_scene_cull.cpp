@@ -3295,8 +3295,9 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 			}
 
 			// RT: collect ALL instances inside the camera AABB for TLAS and light gathering.
-			// Frustum-visible instances are guaranteed to be inside the AABB (superset),
-			// so skip the AABB test for them. Only test AABB for non-frustum instances.
+			// Test every instance against the rotation-invariant volume. The raster
+			// frustum plane test permits false positives for large AABBs outside
+			// this volume; accepting them would churn RT membership on camera yaw.
 			// Mask out editor-only layers (20+) so gizmos/grid don't enter the TLAS.
 			//
 			// Visibility-range parity: instances that failed VIS_CHECK for raster (i.e. they
@@ -3309,8 +3310,8 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 			// HIDDEN_CLOSE_RANGE (fully faded out), matching the point where raster
 			// switches over. In-frustum children are subject to the same rule.
 			if (cull_data.cull->rt_enabled && (idata.layer_mask & ((1 << 20) - 1))) {
-				// For off-frustum instances, also run VIS_CHECK to match raster gating.
-				bool rt_in_range = in_frustum || (cull_data.scenario->instance_aabbs[i].in_aabb(cull_data.cull->rt_aabb) && VIS_CHECK);
+				const bool rt_in_range = (idata.flags & InstanceData::FLAG_IGNORE_ALL_CULLING) ||
+						(cull_data.scenario->instance_aabbs[i].in_aabb(cull_data.cull->rt_aabb) && VIS_CHECK);
 				if (rt_in_range) {
 					// Exclude visibility-parent children while their parent is in the
 					// FADE_CHILDREN cross-fade band. PT is binary: only one LOD at a time.
@@ -3328,6 +3329,8 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 						uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 						if (base_type == RSE::INSTANCE_LIGHT) {
 							cull_result.rt_light_instances.push_back(RID::from_uint64(idata.instance_data_rid));
+						} else if (base_type == RSE::INSTANCE_DECAL) {
+							cull_result.rt_decal_instances.push_back(RID::from_uint64(idata.instance_data_rid));
 						} else if ((base_type == RSE::INSTANCE_MESH || base_type == RSE::INSTANCE_MULTIMESH) &&
 								!(idata.flags & InstanceData::FLAG_CAST_SHADOWS_ONLY)) {
 							cull_result.rt_geometry_instances.push_back(idata.instance_geometry);
@@ -3440,9 +3443,17 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	cull.rt_enabled = p_environment.is_valid() &&
 			scene_render->environment_get_pathtracing_enabled(p_environment);
 	if (cull.rt_enabled) {
-		float z_far = p_camera_data->main_projection.get_z_far();
-		Vector3 cam_origin = p_camera_data->main_transform.origin;
-		cull.rt_aabb = AABB(cam_origin - Vector3(z_far, z_far, z_far), Vector3(z_far, z_far, z_far) * 2.0);
+		// Enclose every projection corner independent of camera rotation.
+		Vector3 endpoints[8];
+		ERR_FAIL_COND(!p_camera_data->main_projection.get_endpoints(Transform3D(), endpoints));
+		real_t radius_squared = 0;
+		for (const Vector3 &endpoint : endpoints) {
+			radius_squared = MAX(radius_squared, endpoint.length_squared());
+		}
+		const real_t radius = Math::sqrt(radius_squared);
+		const Vector3 extent(radius, radius, radius);
+		const Vector3 cam_origin = p_camera_data->main_transform.origin;
+		cull.rt_aabb = AABB(cam_origin - extent, extent * 2.0);
 	}
 
 	Vector<RID> directional_lights;
@@ -3796,7 +3807,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	}
 
 	RENDER_TIMESTAMP("Render 3D Scene");
-	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info, &scene_cull_result.rt_geometry_instances, &scene_cull_result.rt_light_instances);
+	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info, &scene_cull_result.rt_geometry_instances, &scene_cull_result.rt_light_instances, &scene_cull_result.rt_decal_instances);
 
 	if (p_viewport.is_valid()) {
 		RSG::viewport->viewport_set_prev_camera_data(p_viewport, p_camera_data);

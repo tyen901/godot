@@ -43,6 +43,20 @@ void BindlessBlock::initialize(RenderingDevice *p_rd) {
 	texture_to_index[default_texture] = 0;
 }
 
+void BindlessBlock::_texture_replaced(void *p_userdata, RID p_old_texture, RID p_new_texture) {
+	BindlessBlock *block = static_cast<BindlessBlock *>(p_userdata);
+	block->texture_to_index.erase(p_old_texture);
+	for (uint32_t i = 0; i < block->textures.size(); i++) {
+		if (block->textures[i] == p_old_texture) {
+			block->textures[i] = p_new_texture;
+			block->texture_to_index[p_new_texture] = i;
+		}
+	}
+	if (block->default_texture == p_old_texture) {
+		block->default_texture = p_new_texture;
+	}
+}
+
 void BindlessBlock::begin_frame() {
 	if (!is_initialized()) {
 		return;
@@ -140,6 +154,7 @@ void BindlessBlock::finalize(RID p_shader, uint32_t p_set_index) {
 	uniform_set = rd->uniform_set_create(uniforms, p_shader, p_set_index);
 	ERR_FAIL_COND_MSG(!uniform_set.is_valid(), "Failed to create bindless uniform set.");
 	rd->set_resource_name(uniform_set, "Bindless Texture Set");
+	rd->uniform_set_set_texture_replacement_callback(uniform_set, &BindlessBlock::_texture_replaced, this);
 
 	needs_refinalize = false;
 }

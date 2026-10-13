@@ -344,6 +344,7 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 
 void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 	if (p_viewport->measure_render_time) {
+		p_viewport->time_cpu_begin = OS::get_singleton()->get_ticks_usec();
 		String rt_id = "vp_begin_" + itos(p_viewport->self.get_id());
 		RSG::utilities->capture_timestamp(rt_id);
 		timestamp_vp_map[rt_id] = p_viewport->self;
@@ -768,6 +769,7 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 		String rt_id = "vp_end_" + itos(p_viewport->self.get_id());
 		RSG::utilities->capture_timestamp(rt_id);
 		timestamp_vp_map[rt_id] = p_viewport->self;
+		p_viewport->time_cpu_end = OS::get_singleton()->get_ticks_usec();
 	}
 }
 
@@ -1615,7 +1617,7 @@ float RendererViewport::viewport_get_measured_render_time_gpu(RID p_viewport) co
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL_V(viewport, 0);
 
-	return double((viewport->time_gpu_end - viewport->time_gpu_begin) / 1000) / 1000.0;
+	return viewport->time_gpu_measured;
 }
 
 void RendererViewport::viewport_set_snap_2d_transforms_to_pixel(RID p_viewport, bool p_enabled) {
@@ -1723,7 +1725,7 @@ bool RendererViewport::free(RID p_rid) {
 	return false;
 }
 
-void RendererViewport::handle_timestamp(String p_timestamp, uint64_t p_cpu_time, uint64_t p_gpu_time) {
+void RendererViewport::handle_timestamp(String p_timestamp, uint64_t p_gpu_time, uint64_t p_frame) {
 	RID *vp = timestamp_vp_map.getptr(p_timestamp);
 	if (!vp) {
 		return;
@@ -1735,13 +1737,18 @@ void RendererViewport::handle_timestamp(String p_timestamp, uint64_t p_cpu_time,
 	}
 
 	if (p_timestamp.begins_with("vp_begin")) {
-		viewport->time_cpu_begin = p_cpu_time;
 		viewport->time_gpu_begin = p_gpu_time;
+		viewport->time_gpu_begin_frame = p_frame;
 	}
 
 	if (p_timestamp.begins_with("vp_end")) {
-		viewport->time_cpu_end = p_cpu_time;
 		viewport->time_gpu_end = p_gpu_time;
+		// A synchronous readback or exhausted staging pool can split a viewport
+		// across device submissions. Never subtract an old frame's begin query.
+		viewport->time_gpu_measured = viewport->time_gpu_begin_frame == p_frame && p_gpu_time >= viewport->time_gpu_begin
+				? double(p_gpu_time - viewport->time_gpu_begin) / 1000000.0
+				: -1.0;
+		viewport->time_gpu_begin_frame = UINT64_MAX;
 	}
 }
 

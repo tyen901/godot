@@ -42,6 +42,8 @@
 #include "scene/resources/texture.h"
 #include "servers/rendering/rendering_server.h"
 
+#include "modules/modules_enabled.gen.h" // IWYU pragma: keep. For texture_streaming.
+
 void Material::set_next_pass(const Ref<Material> &p_pass) {
 	for (Ref<Material> pass_child = p_pass; pass_child.is_valid(); pass_child = pass_child->get_next_pass()) {
 		ERR_FAIL_COND_MSG(pass_child == this, "Can't set as next_pass one of its parents to prevent crashes due to recursive loop.");
@@ -2032,6 +2034,39 @@ void fragment() {)";
 		code += R"(	vec3 detail_norm = mix(NORMAL_MAP, detail_norm_tex.rgb, detail_tex.a);
 	NORMAL_MAP = mix(NORMAL_MAP, detail_norm, detail_mask_tex.r);
 	ALBEDO.rgb = mix(ALBEDO.rgb, detail, detail_mask_tex.r);
+)";
+	}
+
+	bool streaming_enabled = false;
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	streaming_enabled = GLOBAL_GET_CACHED(bool, "rendering/textures/streaming/enabled");
+#endif
+	if (streaming_enabled && flags[FLAG_UV1_USE_TRIPLANAR]) {
+		code += R"(
+	// Texture streaming feedback for triplanar.
+	// Keep in sync with visual shader.
+	{
+		vec3 pos_ddx = dFdx(uv1_triplanar_pos);
+		vec3 pos_ddy = dFdy(uv1_triplanar_pos);
+		vec2 uv_ddx;
+		vec2 uv_ddy;
+		if (uv1_power_normal.x >= uv1_power_normal.y && uv1_power_normal.x >= uv1_power_normal.z) {
+			uv_ddx = pos_ddx.zy;
+			uv_ddy = pos_ddy.zy;
+		} else if (uv1_power_normal.y >= uv1_power_normal.z) {
+			uv_ddx = pos_ddx.xz;
+			uv_ddy = pos_ddy.xz;
+		} else {
+			uv_ddx = pos_ddx.xy;
+			uv_ddy = pos_ddy.xy;
+		}
+
+		float uv_ddx_sq = dot(uv_ddx, uv_ddx);
+		float uv_ddy_sq = dot(uv_ddy, uv_ddy);
+		const float MAX_ANISOTROPY = 16.0;
+		float footprint_sq = max(min(uv_ddx_sq, uv_ddy_sq), max(uv_ddx_sq, uv_ddy_sq) / (MAX_ANISOTROPY * MAX_ANISOTROPY));
+		STREAMING_LOD = 0.5 * log2(max(footprint_sq, 1e-30)) + 12.0;
+	}
 )";
 	}
 

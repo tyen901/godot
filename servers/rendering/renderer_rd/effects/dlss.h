@@ -56,6 +56,7 @@ public:
 		char preset = '?';
 		bool reset_accumulation = false;
 		Projection reprojection;
+		Projection inverse_reprojection;
 		Projection cam_projection;
 		Transform3D cam_transform;
 		bool dlss_g = false;

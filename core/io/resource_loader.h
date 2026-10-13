@@ -138,6 +138,7 @@ public:
 		ThreadLoadTask *task_if_unregistered = nullptr;
 
 		void clear();
+		void delete_self();
 
 		virtual ~LoadToken();
 	};
@@ -179,6 +180,7 @@ private:
 	static Ref<ResourceFormatLoader> _find_custom_resource_format_loader(const String &path);
 
 	struct ThreadLoadTask {
+		uint64_t load_serial = 0;
 		WorkerThreadPool::TaskID task_id = 0; // Used if run on a worker thread from the pool.
 		Thread::ID thread_id = 0; // Used if running on an user thread (e.g., simple non-threaded load).
 		int thread_index = -1;
@@ -233,6 +235,8 @@ private:
 	friend SafeBinaryMutex<BINARY_MUTEX_TAG> &_get_res_loader_mutex();
 
 	static HashMap<String, ThreadLoadTask> thread_load_tasks;
+	static uint64_t load_serial;
+	static HashSet<uint64_t> active_load_serials;
 	static HashMap<int, String> thread_waiting_on;
 	static LocalVector<int> yielders;
 	static bool cleaning_tasks;
@@ -246,6 +250,9 @@ private:
 	static String _validate_local_path(const String &p_path);
 
 public:
+	// Native clients can await a finite cohort without delaying subsequent loads.
+	static uint64_t get_loading_barrier();
+	static bool is_loading_before(uint64_t p_barrier);
 	static Error load_threaded_request(const String &p_path, const String &p_type_hint = "", bool p_use_sub_threads = false, CacheMode p_cache_mode = CACHE_MODE_REUSE);
 	static ThreadLoadStatus load_threaded_get_status(const String &p_path, float *r_progress = nullptr);
 	static Ref<Resource> load_threaded_get(const String &p_path, Error *r_error = nullptr);

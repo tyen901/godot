@@ -437,6 +437,9 @@ uint32_t RenderingDeviceDriverVulkan::SubgroupCapabilities::supported_stages_fla
 		flags += SHADER_STAGE_INTERSECTION_BIT;
 	}
 
+	if (supported_stages & VK_SHADER_STAGE_CALLABLE_BIT_KHR) {
+		flags += SHADER_STAGE_CALLABLE_BIT;
+	}
 	return flags;
 }
 
@@ -4350,6 +4353,7 @@ static VkShaderStageFlagBits RD_STAGE_TO_VK_SHADER_STAGE_BITS[RDD::SHADER_STAGE_
 	VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
 	VK_SHADER_STAGE_MISS_BIT_KHR,
 	VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+	VK_SHADER_STAGE_CALLABLE_BIT_KHR,
 };
 
 RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) {
@@ -4459,7 +4463,7 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 				stage == ShaderStage::SHADER_STAGE_ANY_HIT ||
 				stage == ShaderStage::SHADER_STAGE_CLOSEST_HIT ||
 				stage == ShaderStage::SHADER_STAGE_MISS ||
-				stage == ShaderStage::SHADER_STAGE_INTERSECTION) {
+				stage == ShaderStage::SHADER_STAGE_INTERSECTION || stage == ShaderStage::SHADER_STAGE_CALLABLE) {
 			has_raytracing_stages = true;
 			break;
 		}
@@ -6743,20 +6747,20 @@ void RenderingDeviceDriverVulkan::command_bind_raytracing_uniform_set(CommandBuf
 	vkCmdBindDescriptorSets(command_buffer->vk_command_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, shader_info->vk_pipeline_layout, p_set_index, 1, &usi->vk_descriptor_set, 0, nullptr);
 }
 
-void RenderingDeviceDriverVulkan::command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
+void RenderingDeviceDriverVulkan::command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, const ShaderBindingTable &p_callable_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
 #if VULKAN_RAYTRACING_ENABLED
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	VkStridedDeviceAddressRegionKHR raygen_sbt = _sbt_to_vk_strided_device_address_region(p_raygen_sbt);
 	VkStridedDeviceAddressRegionKHR miss_sbt = _sbt_to_vk_strided_device_address_region(p_miss_sbt);
 	VkStridedDeviceAddressRegionKHR hit_sbt = _sbt_to_vk_strided_device_address_region(p_hit_sbt);
-	VkStridedDeviceAddressRegionKHR callable_sbt = {};
+	VkStridedDeviceAddressRegionKHR callable_sbt = _sbt_to_vk_strided_device_address_region(p_callable_sbt);
 	device_functions.CmdTraceRaysKHR(command_buffer->vk_command_buffer, &raygen_sbt, &miss_sbt, &hit_sbt, &callable_sbt, p_width, p_height, p_depth);
 #endif
 }
 
 // --- PIPELINE ---
 
-RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) {
+RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, VectorView<uint32_t> p_callable_shader_indices, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) {
 #if VULKAN_RAYTRACING_ENABLED
 	VkPipelineShaderStageCreateInfo *stages = ALLOCA_ARRAY(VkPipelineShaderStageCreateInfo, p_shaders.size());
 
@@ -6796,7 +6800,7 @@ RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_creat
 		ERR_FAIL_COND_V_MSG(!found_shader_stage, RaytracingPipelineID(), vformat("Shader \"%s\" doesn't have a stage compatible with the specified raytracing PipelineShaderStage.", shader_info->name));
 	}
 
-	uint32_t shader_group_count = p_raygen_shader_indices.size() + p_miss_shader_indices.size() + p_hit_groups.size();
+	uint32_t shader_group_count = p_raygen_shader_indices.size() + p_miss_shader_indices.size() + p_hit_groups.size() + p_callable_shader_indices.size();
 	VkRayTracingShaderGroupCreateInfoKHR *shader_groups = ALLOCA_ARRAY(VkRayTracingShaderGroupCreateInfoKHR, shader_group_count);
 
 	for (uint32_t i = 0; i < p_raygen_shader_indices.size(); i++) {
@@ -6834,6 +6838,17 @@ RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_creat
 		vk_shader_group.intersectionShader = hit_group.intersection_shader_index;
 	}
 
+	for (uint32_t i = 0; i < p_callable_shader_indices.size(); i++) {
+		VkRayTracingShaderGroupCreateInfoKHR &group = shader_groups[p_raygen_shader_indices.size() + p_miss_shader_indices.size() + p_hit_groups.size() + i];
+		group = {};
+		group.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+		group.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+		group.generalShader = p_callable_shader_indices[i];
+		group.closestHitShader = VK_SHADER_UNUSED_KHR;
+		group.anyHitShader = VK_SHADER_UNUSED_KHR;
+		group.intersectionShader = VK_SHADER_UNUSED_KHR;
+	}
+
 	const ShaderInfo *layout_defining_shader_info = (const ShaderInfo *)p_layout_defining_shader.id;
 
 	VkRayTracingPipelineCreateInfoKHR pipeline_create_info = {};
@@ -6846,7 +6861,11 @@ RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_creat
 	pipeline_create_info.maxPipelineRayRecursionDepth = p_max_trace_recursion_depth;
 
 	VkPipeline vk_pipeline = VK_NULL_HANDLE;
+	const uint64_t rt_pipeline_start = OS::get_singleton()->get_ticks_usec();
 	VkResult err = device_functions.CreateRaytracingPipelinesKHR(vk_device, VK_NULL_HANDLE, pipelines_cache.vk_cache, 1, &pipeline_create_info, nullptr, &vk_pipeline);
+	if (OS::get_singleton()->has_environment("GODOT_RTX_PROFILE")) {
+		print_line(vformat("RTX VULKAN PIPELINE: groups=%d stages=%d driver=%.2f ms result=%d", shader_group_count, p_shaders.size(), (OS::get_singleton()->get_ticks_usec() - rt_pipeline_start) / 1000.0, (int)err));
+	}
 	ERR_FAIL_COND_V_MSG(err, RaytracingPipelineID(), vformat("Couldn't create Vulkan raytracing pipelines (VkResult error %d).", err));
 
 	return RaytracingPipelineID(vk_pipeline);

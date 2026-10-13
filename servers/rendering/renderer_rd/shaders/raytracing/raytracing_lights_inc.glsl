@@ -19,6 +19,8 @@
 // Light Data (matches C++ RT_LightData, 80 bytes, std430)
 // ============================================================================
 
+const uint RT_LIGHT_SHADOW_ENABLED = 1u;
+
 struct RTLightData {
 	vec3 position; // World pos (omni/spot) or direction (directional).
 	uint type; // RT_LIGHT_TYPE_*.
@@ -31,7 +33,7 @@ struct RTLightData {
 	float indirect_energy; // Godot indirect energy multiplier.
 	float inv_spot_attenuation; // Spot cone softness.
 	float cos_spot_angle; // Cosine of spot cone half-angle.
-	float _pad0;
+	uint flags; // Native Light3D shadow enable state.
 	vec3 spot_direction; // Spot direction (normalized, world space).
 	float _pad1;
 };
@@ -345,7 +347,7 @@ vec3 lights_evaluate_direct_lighting(
 			spot_atten = 1.0 - pow(spot_rim, light.inv_spot_attenuation);
 		}
 
-		if (!lights_trace_shadow_ray(hit_pos, L, shadow_dist, rng_state)) {
+		if ((light.flags & RT_LIGHT_SHADOW_ENABLED) != 0u && !lights_trace_shadow_ray(hit_pos, L, shadow_dist, rng_state)) {
 			return vec3(0.0);
 		}
 
@@ -378,7 +380,7 @@ vec3 lights_evaluate_direct_lighting(
 			return vec3(0.0);
 		}
 
-		if (!lights_trace_shadow_ray(hit_pos, L, ls.max_distance, rng_state)) {
+		if ((light.flags & RT_LIGHT_SHADOW_ENABLED) != 0u && !lights_trace_shadow_ray(hit_pos, L, ls.max_distance, rng_state)) {
 			return vec3(0.0);
 		}
 

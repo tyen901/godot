@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "mesh_storage.h"
+#include "material_storage.h"
 
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_viewport.h"
@@ -225,8 +226,18 @@ RID MeshStorage::mesh_allocate() {
 	return mesh_owner.allocate_rid();
 }
 
+uint64_t MeshStorage::mesh_get_rt_revision(RID p_mesh) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	return mesh ? mesh->rt_revision.get() : 0;
+}
+
+uint64_t MeshStorage::multimesh_get_rt_revision(RID p_multimesh) const {
+	const MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
+	return multimesh ? multimesh->rt_revision.get() : 0;
+}
+
 void MeshStorage::mesh_initialize(RID p_rid) {
-	mesh_owner.initialize_rid(p_rid, Mesh());
+	mesh_owner.initialize_rid(p_rid);
 }
 
 void MeshStorage::mesh_free(RID p_rid) {
@@ -234,6 +245,8 @@ void MeshStorage::mesh_free(RID p_rid) {
 	mesh_set_shadow_mesh(p_rid, RID());
 	Mesh *mesh = mesh_owner.get_or_null(p_rid);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 
 	mesh->dependency.deleted_notify(p_rid);
 	if (mesh->instances.size()) {
@@ -264,6 +277,8 @@ void MeshStorage::mesh_set_blend_shape_count(RID p_mesh, int p_blend_shape_count
 void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::SurfaceData &p_surface) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 
 	ERR_FAIL_COND(mesh->surface_count == RSE::MAX_MESH_SURFACES);
 
@@ -509,6 +524,7 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 	mesh->skeleton_aabb_version = 0;
 
 	s->material = new_surface.material;
+	MaterialStorage::get_singleton()->reference_raytracing_material(s->material);
 
 	mesh->surfaces = (Mesh::Surface **)memrealloc(mesh->surfaces, sizeof(Mesh::Surface *) * (mesh->surface_count + 1));
 	mesh->surfaces[mesh->surface_count] = s;
@@ -560,6 +576,7 @@ void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 		RD::get_singleton()->free_rid(s.blend_shape_buffer);
 	}
 
+	MaterialStorage::get_singleton()->unreference_raytracing_material(s.material);
 	memdelete(p_mesh->surfaces[p_surface]);
 }
 
@@ -587,6 +604,8 @@ void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, i
 	ERR_FAIL_COND(p_data.is_empty());
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	ERR_FAIL_UNSIGNED_INDEX((uint32_t)p_surface, mesh->surface_count);
 	ERR_FAIL_COND(mesh->surfaces[p_surface]->vertex_buffer.is_null());
 
@@ -603,6 +622,8 @@ void MeshStorage::mesh_surface_update_attribute_region(RID p_mesh, int p_surface
 	ERR_FAIL_COND(p_data.is_empty());
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	ERR_FAIL_UNSIGNED_INDEX((uint32_t)p_surface, mesh->surface_count);
 	ERR_FAIL_COND(mesh->surfaces[p_surface]->attribute_buffer.is_null());
 
@@ -619,6 +640,8 @@ void MeshStorage::mesh_surface_update_skin_region(RID p_mesh, int p_surface, int
 	ERR_FAIL_COND(p_data.is_empty());
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	ERR_FAIL_UNSIGNED_INDEX((uint32_t)p_surface, mesh->surface_count);
 	ERR_FAIL_COND(mesh->surfaces[p_surface]->skin_buffer.is_null());
 
@@ -635,6 +658,8 @@ void RendererRD::MeshStorage::mesh_surface_update_index_region(RID p_mesh, int p
 	ERR_FAIL_COND(p_data.is_empty());
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	ERR_FAIL_UNSIGNED_INDEX((uint32_t)p_surface, mesh->surface_count);
 	ERR_FAIL_COND(mesh->surfaces[p_surface]->index_buffer.is_null());
 
@@ -678,8 +703,12 @@ RID MeshStorage::mesh_surface_get_index_buffer_rd_rid(RID p_mesh, int p_surface)
 void MeshStorage::mesh_surface_set_material(RID p_mesh, int p_surface, RID p_material) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	ERR_FAIL_UNSIGNED_INDEX((uint32_t)p_surface, mesh->surface_count);
+	MaterialStorage::get_singleton()->unreference_raytracing_material(mesh->surfaces[p_surface]->material);
 	mesh->surfaces[p_surface]->material = p_material;
+	MaterialStorage::get_singleton()->reference_raytracing_material(p_material);
 
 	mesh->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 	mesh->material_cache.clear();
@@ -919,6 +948,8 @@ void MeshStorage::mesh_set_shadow_mesh(RID p_mesh, RID p_shadow_mesh) {
 void MeshStorage::mesh_clear(RID p_mesh) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 
 	// Clear instance data before mesh data.
 	for (MeshInstance *mi : mesh->instances) {
@@ -949,6 +980,8 @@ void MeshStorage::mesh_clear(RID p_mesh) {
 void MeshStorage::mesh_surface_remove(RID p_mesh, int p_surface) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	mesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	ERR_FAIL_UNSIGNED_INDEX((uint32_t)p_surface, mesh->surface_count);
 
 	// Clear instance data before mesh data.
@@ -1592,7 +1625,7 @@ RID MeshStorage::_multimesh_allocate() {
 	return multimesh_owner.allocate_rid();
 }
 void MeshStorage::_multimesh_initialize(RID p_rid) {
-	multimesh_owner.initialize_rid(p_rid, MultiMesh());
+	multimesh_owner.initialize_rid(p_rid);
 }
 
 void MeshStorage::_multimesh_free(RID p_rid) {
@@ -1601,6 +1634,9 @@ void MeshStorage::_multimesh_free(RID p_rid) {
 	_update_dirty_multimeshes();
 	multimesh_allocate_data(p_rid, 0, RSE::MULTIMESH_TRANSFORM_2D);
 	MultiMesh *multimesh = multimesh_owner.get_or_null(p_rid);
+	ERR_FAIL_NULL(multimesh);
+	multimesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	multimesh->dependency.deleted_notify(p_rid);
 	multimesh_owner.free(p_rid);
 }
@@ -1608,6 +1644,8 @@ void MeshStorage::_multimesh_free(RID p_rid) {
 void MeshStorage::_multimesh_allocate_data(RID p_multimesh, int p_instances, RSE::MultimeshTransformFormat p_transform_format, bool p_use_colors, bool p_use_custom_data, bool p_use_indirect) {
 	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
 	ERR_FAIL_NULL(multimesh);
+	multimesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 
 	if (multimesh->instances == p_instances && multimesh->xform_format == p_transform_format && multimesh->uses_colors == p_use_colors && multimesh->uses_custom_data == p_use_custom_data) {
 		return;
@@ -1672,6 +1710,8 @@ void MeshStorage::_multimesh_enable_motion_vectors(MultiMesh *multimesh) {
 	if (multimesh->motion_vectors_enabled) {
 		return;
 	}
+	multimesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 
 	multimesh->motion_vectors_enabled = true;
 
@@ -1737,6 +1777,8 @@ int MeshStorage::_multimesh_get_instance_count(RID p_multimesh) const {
 void MeshStorage::_multimesh_set_mesh(RID p_multimesh, RID p_mesh) {
 	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
 	ERR_FAIL_NULL(multimesh);
+	multimesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	if (multimesh->mesh == p_mesh) {
 		return;
 	}
@@ -1859,6 +1901,8 @@ bool MeshStorage::_multimesh_uses_motion_vectors(MultiMesh *multimesh) {
 }
 
 void MeshStorage::_multimesh_mark_dirty(MultiMesh *multimesh, int p_index, bool p_aabb) {
+	multimesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	uint32_t region_index = p_index / MULTIMESH_DIRTY_REGION_SIZE;
 #ifdef DEBUG_ENABLED
 	uint32_t data_cache_dirty_region_count = Math::division_round_up(multimesh->instances, MULTIMESH_DIRTY_REGION_SIZE);
@@ -1881,6 +1925,8 @@ void MeshStorage::_multimesh_mark_dirty(MultiMesh *multimesh, int p_index, bool 
 }
 
 void MeshStorage::_multimesh_mark_all_dirty(MultiMesh *multimesh, bool p_data, bool p_aabb) {
+	multimesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	if (p_data) {
 		uint32_t data_cache_dirty_region_count = Math::division_round_up(multimesh->instances, MULTIMESH_DIRTY_REGION_SIZE);
 
@@ -2177,6 +2223,8 @@ Color MeshStorage::_multimesh_instance_get_custom_data(RID p_multimesh, int p_in
 void MeshStorage::_multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_buffer) {
 	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
 	ERR_FAIL_NULL(multimesh);
+	multimesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	ERR_FAIL_COND(p_buffer.size() != (multimesh->instances * (int)multimesh->stride_cache));
 
 	bool used_motion_vectors = multimesh->motion_vectors_enabled;
@@ -2279,6 +2327,8 @@ Vector<float> MeshStorage::_multimesh_get_buffer(RID p_multimesh) const {
 void MeshStorage::_multimesh_set_visible_instances(RID p_multimesh, int p_visible) {
 	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
 	ERR_FAIL_NULL(multimesh);
+	multimesh->rt_revision.increment();
+	rt_geometry_revision.increment();
 	ERR_FAIL_COND(p_visible < -1 || p_visible > multimesh->instances);
 	if (multimesh->visible_instances == p_visible) {
 		return;
@@ -2606,3 +2656,4 @@ void MeshStorage::skeleton_update_dependency(RID p_skeleton, DependencyTracker *
 
 	p_instance->update_dependency(&skeleton->dependency);
 }
+

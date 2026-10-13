@@ -273,3 +273,16 @@ VertexAttributes fetch_vertex_attributes(in GeometryData geom, vec2 hit_attribs,
 	return attrs;
 }
 #endif
+
+vec3 rt_triangle_position(GeometryData geom, uint index) {
+	if ((geom.flags & FLAG_COMPRESSED) != 0u) {
+		Uint32Buffer vertices = Uint32Buffer(geom.vertex_address);
+		uint a = vertices.v[index * 2u];
+		uint b = vertices.v[index * 2u + 1u];
+		return vec3(float(a & 65535u), float(a >> 16u), float(b & 65535u)) / 65535.0;
+	}
+	FloatBuffer vertices = FloatBuffer(geom.vertex_address);
+	uint offset = index * (geom.position_stride >> 2u);
+	return vec3(vertices.v[offset], vertices.v[offset + 1u], vertices.v[offset + 2u]);
+}
+

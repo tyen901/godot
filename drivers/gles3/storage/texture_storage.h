@@ -582,6 +582,9 @@ public:
 	virtual RID texture_drawable_get_default_material() const override;
 
 	virtual void texture_replace(RID p_texture, RID p_by_texture) override;
+	virtual void texture_replace_compatible(RID p_texture, RID p_by_texture) override {
+		texture_replace(p_texture, p_by_texture);
+	}
 	virtual void texture_set_size_override(RID p_texture, int p_width, int p_height) override;
 
 	virtual void texture_set_path(RID p_texture, const String &p_path) override;
@@ -642,6 +645,8 @@ public:
 
 	virtual void decal_set_size(RID p_decal, const Vector3 &p_size) override;
 	virtual void decal_set_texture(RID p_decal, RSE::DecalTexture p_type, RID p_texture) override;
+	virtual void decal_set_instance_custom(RID p_decal, const Vector4 &p_custom) override {}
+	void decal_set_material(RID p_decal, RID p_material) override { ERR_FAIL_COND_MSG(p_material.is_valid(), "Decal shader materials require the native RTX renderer."); }
 	virtual void decal_set_emission_energy(RID p_decal, float p_energy) override;
 	virtual void decal_set_albedo_mix(RID p_decal, float p_mix) override;
 	virtual void decal_set_modulate(RID p_decal, const Color &p_modulate) override;
@@ -764,6 +769,8 @@ public:
 	}
 
 	String get_framebuffer_error(GLenum p_status);
+
+	virtual void texture_2d_attach_streaming_state(RID p_texture, RID p_streaming_state) override {}
 };
 
 inline String TextureStorage::get_framebuffer_error(GLenum p_status) {

@@ -128,6 +128,7 @@ public:
 				uint32_t multimesh_has_custom_data : 1;
 				uint32_t fog_use_legacy_blending : 1;
 				uint32_t cluster_has_area_light : 1;
+				uint32_t material_feedback : 1;
 			};
 		};
 
@@ -255,6 +256,7 @@ public:
 		bool wireframe = false;
 
 		bool unshaded = false;
+		bool is_decal = false;
 		bool uses_vertex = false;
 		bool uses_position = false;
 		bool uses_sss = false;
@@ -263,6 +265,7 @@ public:
 		bool uses_depth_texture = false;
 		bool uses_normal_texture = false;
 		bool uses_time = false;
+		bool rt_is_procedural = false;
 		bool uses_vertex_time = false;
 		bool uses_fragment_time = false;
 		bool writes_modelview_or_projection = false;
@@ -394,6 +397,7 @@ public:
 	SceneForwardClusteredShaderRD shader;
 	ShaderCompiler compiler;
 	bool emulate_point_size = false;
+	bool depth_prepass_enabled = false;
 
 	RID default_shader;
 	RID default_material;
@@ -406,6 +410,7 @@ public:
 
 	RID default_vec4_xform_buffer;
 	RID default_vec4_xform_uniform_set;
+	RID default_material_feedback_buffer;
 
 	RID shadow_sampler;
 

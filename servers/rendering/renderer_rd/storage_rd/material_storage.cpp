@@ -36,9 +36,16 @@
 #include "core/math/projection.h"
 #include "core/templates/local_vector.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
+#include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
 #include "servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/storage/variant_converters.h"
+
+#include "modules/modules_enabled.gen.h"
+
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+#include "modules/texture_streaming/texture_streaming.h"
+#endif
 
 using namespace RendererRD;
 
@@ -738,6 +745,39 @@ bool MaterialStorage::ShaderData::blend_mode_uses_blend_alpha(BlendMode p_mode) 
 ///////////////////////////////////////////////////////////////////////////
 // MaterialStorage::MaterialData
 
+void MaterialStorage::fill_std140_uniform(const ShaderLanguage::ShaderNode::Uniform &p_uniform, const Variant &p_value, uint8_t *r_data, bool p_use_linear_color) {
+	if (p_value.get_type() != Variant::NIL) {
+		//user provided
+		if (p_uniform.hint == ShaderLanguage::ShaderNode::Uniform::HINT_COLOR_CONVERSION_DISABLED) {
+			_fill_std140_variant_ubo_value(p_uniform.type, p_uniform.array_size, p_value, r_data, false);
+		} else {
+			_fill_std140_variant_ubo_value(p_uniform.type, p_uniform.array_size, p_value, r_data, p_use_linear_color);
+		}
+
+	} else if (p_uniform.default_value.size()) {
+		//default value
+		_fill_std140_ubo_value(p_uniform.type, p_uniform.default_value, r_data, p_uniform.hint == ShaderLanguage::ShaderNode::Uniform::HINT_SOURCE_COLOR && p_use_linear_color);
+	} else {
+		//zero because it was not provided
+		if ((p_uniform.type == ShaderLanguage::TYPE_VEC3 || p_uniform.type == ShaderLanguage::TYPE_VEC4) && p_uniform.hint == ShaderLanguage::ShaderNode::Uniform::HINT_SOURCE_COLOR) {
+			//colors must be set as black, with alpha as 1.0
+			_fill_std140_variant_ubo_value(p_uniform.type, p_uniform.array_size, Color(0, 0, 0, 1), r_data, p_use_linear_color);
+		} else if ((p_uniform.type == ShaderLanguage::TYPE_VEC3 || p_uniform.type == ShaderLanguage::TYPE_VEC4) && p_uniform.hint == ShaderLanguage::ShaderNode::Uniform::HINT_COLOR_CONVERSION_DISABLED) {
+			_fill_std140_variant_ubo_value(p_uniform.type, p_uniform.array_size, Color(0, 0, 0, 1), r_data, false);
+		} else if (p_uniform.type == ShaderLanguage::TYPE_MAT2) {
+			// mat uniforms are identity matrix by default.
+			_fill_std140_variant_ubo_value(p_uniform.type, p_uniform.array_size, Transform2D(), r_data, false);
+		} else if (p_uniform.type == ShaderLanguage::TYPE_MAT3) {
+			_fill_std140_variant_ubo_value(p_uniform.type, p_uniform.array_size, Basis(), r_data, false);
+		} else if (p_uniform.type == ShaderLanguage::TYPE_MAT4) {
+			_fill_std140_variant_ubo_value(p_uniform.type, p_uniform.array_size, Projection(), r_data, false);
+		} else {
+			//else just zero it out
+			_fill_std140_ubo_empty(p_uniform.type, p_uniform.array_size, r_data);
+		}
+	}
+}
+
 void MaterialStorage::MaterialData::update_uniform_buffer(const HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> &p_uniforms, const uint32_t *p_uniform_offsets, const HashMap<StringName, Variant> &p_parameters, uint8_t *p_buffer, uint32_t p_buffer_size, bool p_use_linear_color) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	bool uses_global_buffer = false;
@@ -793,37 +833,7 @@ void MaterialStorage::MaterialData::update_uniform_buffer(const HashMap<StringNa
 		uint8_t *data = &p_buffer[offset];
 		HashMap<StringName, Variant>::ConstIterator V = p_parameters.find(E.key);
 
-		if (V) {
-			//user provided
-			if (E.value.hint == ShaderLanguage::ShaderNode::Uniform::HINT_COLOR_CONVERSION_DISABLED) {
-				_fill_std140_variant_ubo_value(E.value.type, E.value.array_size, V->value, data, false);
-			} else {
-				_fill_std140_variant_ubo_value(E.value.type, E.value.array_size, V->value, data, p_use_linear_color);
-			}
-
-		} else if (E.value.default_value.size()) {
-			//default value
-			_fill_std140_ubo_value(E.value.type, E.value.default_value, data, E.value.hint == ShaderLanguage::ShaderNode::Uniform::HINT_SOURCE_COLOR && p_use_linear_color);
-			//value=E.value.default_value;
-		} else {
-			//zero because it was not provided
-			if ((E.value.type == ShaderLanguage::TYPE_VEC3 || E.value.type == ShaderLanguage::TYPE_VEC4) && E.value.hint == ShaderLanguage::ShaderNode::Uniform::HINT_SOURCE_COLOR) {
-				//colors must be set as black, with alpha as 1.0
-				_fill_std140_variant_ubo_value(E.value.type, E.value.array_size, Color(0, 0, 0, 1), data, p_use_linear_color);
-			} else if ((E.value.type == ShaderLanguage::TYPE_VEC3 || E.value.type == ShaderLanguage::TYPE_VEC4) && E.value.hint == ShaderLanguage::ShaderNode::Uniform::HINT_COLOR_CONVERSION_DISABLED) {
-				_fill_std140_variant_ubo_value(E.value.type, E.value.array_size, Color(0, 0, 0, 1), data, false);
-			} else if (E.value.type == ShaderLanguage::TYPE_MAT2) {
-				// mat uniforms are identity matrix by default.
-				_fill_std140_variant_ubo_value(E.value.type, E.value.array_size, Transform2D(), data, false);
-			} else if (E.value.type == ShaderLanguage::TYPE_MAT3) {
-				_fill_std140_variant_ubo_value(E.value.type, E.value.array_size, Basis(), data, false);
-			} else if (E.value.type == ShaderLanguage::TYPE_MAT4) {
-				_fill_std140_variant_ubo_value(E.value.type, E.value.array_size, Projection(), data, false);
-			} else {
-				//else just zero it out
-				_fill_std140_ubo_empty(E.value.type, E.value.array_size, data);
-			}
-		}
+		fill_std140_uniform(E.value, V ? V->value : Variant(), data, p_use_linear_color);
 	}
 
 	if (uses_global_buffer != (global_buffer_E != nullptr)) {
@@ -857,6 +867,14 @@ MaterialStorage::MaterialData::~MaterialData() {
 		material_storage->global_shader_uniforms.materials_using_texture.erase(global_texture_E);
 	}
 
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	if (material_feedback_rid.is_valid()) {
+		Vector<RID> empty_textures;
+		TextureStreaming::get_singleton()->material_set_textures(material_feedback_rid, empty_textures);
+		material_feedback_rid = RID();
+	}
+#endif
+
 	for (int i = 0; i < 2; i++) {
 		if (uniform_buffer[i].is_valid()) {
 			RD::get_singleton()->free_rid(uniform_buffer[i]);
@@ -875,6 +893,7 @@ void MaterialStorage::MaterialData::update_textures(const HashMap<StringName, Va
 
 	bool uses_global_textures = false;
 	global_textures_pass++;
+	Vector<RID> material_feedback_textures;
 
 	for (int i = 0, k = 0; i < p_texture_uniforms.size(); i++) {
 		const StringName &uniform_name = p_texture_uniforms[i].name;
@@ -983,6 +1002,9 @@ void MaterialStorage::MaterialData::update_textures(const HashMap<StringName, Va
 
 				if (tex) {
 					rd_texture = (srgb && tex->rd_texture_srgb.is_valid()) ? tex->rd_texture_srgb : tex->rd_texture;
+					if (tex->streaming_state.is_valid()) {
+						material_feedback_textures.push_back(tex->streaming_state);
+					}
 #ifdef TOOLS_ENABLED
 					if (tex->detect_3d_callback && p_3d_material) {
 						tex->detect_3d_callback(tex->detect_3d_callback_ud);
@@ -1019,6 +1041,13 @@ void MaterialStorage::MaterialData::update_textures(const HashMap<StringName, Va
 			}
 		}
 	}
+
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	if (material_feedback_rid.is_valid() || !material_feedback_textures.is_empty()) {
+		material_feedback_rid = TextureStreaming::get_singleton()->material_set_textures(material_feedback_rid, material_feedback_textures);
+	}
+#endif
+
 	{
 		//for textures no longer used, unregister them
 		List<StringName> to_delete;
@@ -2461,13 +2490,14 @@ void MaterialStorage::_material_uniform_set_erased(void *p_material) {
 			// if a texture is deleted, so re-create it.
 			MaterialStorage::get_singleton()->_material_queue_update(material, false, true);
 		}
-		material->rt_invalidation_counter++;
+		material->rt_invalidation_counter = MaterialStorage::get_singleton()->rt_material_revision.increment();
 		material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 	}
 }
 
 void MaterialStorage::_material_queue_update(Material *material, bool p_uniform, bool p_texture) {
 	MutexLock lock(material_update_list_mutex);
+	material->rt_invalidation_counter = rt_material_revision.increment();
 	material->uniform_dirty = material->uniform_dirty || p_uniform;
 	material->texture_dirty = material->texture_dirty || p_texture;
 
@@ -2499,12 +2529,17 @@ void MaterialStorage::_update_queued_materials() {
 		}
 		material->texture_dirty = false;
 		material->uniform_dirty = false;
+		// Shader resources supply RT-preprocessed programs before geometry binding.
+		if (material->shader && !material->shader->code_rt.is_empty()) {
+			register_raytracing_material(material->self);
+		}
 
 		if (uniforms_changed) {
 			//some implementations such as 3D renderer cache the material uniform set, so update is required
 			material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 		}
 	}
+	prepare_raytracing_materials();
 }
 
 RID MaterialStorage::material_allocate() {
@@ -2533,6 +2568,11 @@ void MaterialStorage::material_free(RID p_rid) {
 	material_set_shader(p_rid, RID()); //clean up shader
 	material->dependency.deleted_notify(p_rid);
 
+	{
+		MutexLock lock(rt_material_candidates_mutex);
+		rt_geometry_materials.erase(p_rid);
+		rt_material_candidates.erase(p_rid);
+	}
 	material_owner.free(p_rid);
 }
 
@@ -2541,7 +2581,7 @@ void MaterialStorage::material_set_shader(RID p_material, RID p_shader) {
 	ERR_FAIL_NULL(material);
 
 	// Invalidate RT cache for this material (shader change).
-	material->rt_invalidation_counter++;
+	material->rt_invalidation_counter = MaterialStorage::get_singleton()->rt_material_revision.increment();
 
 	if (material->data) {
 		memdelete(material->data);
@@ -2652,7 +2692,7 @@ void MaterialStorage::material_set_param(RID p_material, const StringName &p_par
 	}
 
 	// Invalidate RT cache for this material.
-	material->rt_invalidation_counter++;
+	material->rt_invalidation_counter = MaterialStorage::get_singleton()->rt_material_revision.increment();
 
 	if (material->shader && material->shader->data) { //shader is valid
 		bool is_texture = material->shader->data->is_parameter_texture(p_param);
@@ -2866,4 +2906,69 @@ void MaterialStorage::material_set_data_request_function(ShaderType p_shader_typ
 MaterialStorage::MaterialDataRequestFunction MaterialStorage::material_get_data_request_function(ShaderType p_shader_type) {
 	ERR_FAIL_INDEX_V(p_shader_type, SHADER_TYPE_MAX, nullptr);
 	return material_data_request_func[p_shader_type];
+}
+
+void MaterialStorage::register_raytracing_material(RID p_material) {
+	using namespace RendererSceneRenderImplementation;
+	SceneShaderRaytracing *rt = SceneShaderRaytracing::get_existing_singleton();
+	Material *material = material_owner.get_or_null(p_material);
+	if (!rt || !rt->is_active() || !material || material->shader_type != SHADER_TYPE_3D || !material->shader || !material->shader->data) {
+		return;
+	}
+	const SceneShaderForwardClustered::ShaderData *shader = static_cast<const SceneShaderForwardClustered::ShaderData *>(material->shader->data);
+	if ((!shader->is_valid() && !shader->is_decal) || shader->rt_is_procedural || (!shader->is_decal && shader->rt_uses_alpha_pass()) || material_get_param(p_material, "albedo").get_type() == Variant::COLOR) {
+		return;
+	}
+	rt->register_custom_shader(material->shader_id, p_material);
+}
+
+
+void MaterialStorage::queue_raytracing_material(RID p_material) {
+	if (p_material.is_null()) {
+		return;
+	}
+	MutexLock lock(rt_material_candidates_mutex);
+	rt_material_candidates.insert(p_material);
+}
+
+void MaterialStorage::prepare_raytracing_materials(bool p_all_geometry) {
+	HashSet<RID> candidates;
+	{
+		MutexLock lock(rt_material_candidates_mutex);
+		SWAP(candidates, rt_material_candidates);
+		if (p_all_geometry) {
+			for (const KeyValue<RID, uint32_t> &material : rt_geometry_materials) {
+				candidates.insert(material.key);
+			}
+		}
+	}
+	if (p_all_geometry) {
+		for (RID rid : material_owner.get_owned_list()) {
+			const Material *material = material_owner.get_or_null(rid);
+			if (material && material->shader && !material->shader->code_rt.is_empty()) {
+				candidates.insert(rid);
+			}
+		}
+	}
+	for (RID material : candidates) {
+		register_raytracing_material(material);
+	}
+}
+
+void MaterialStorage::reference_raytracing_material(RID p_material) {
+	if (p_material.is_null()) {
+		return;
+	}
+	MutexLock lock(rt_material_candidates_mutex);
+	rt_geometry_materials[p_material]++;
+	rt_material_candidates.insert(p_material);
+}
+
+void MaterialStorage::unreference_raytracing_material(RID p_material) {
+	MutexLock lock(rt_material_candidates_mutex);
+	uint32_t *references = rt_geometry_materials.getptr(p_material);
+	if (references && --*references == 0) {
+		rt_geometry_materials.erase(p_material);
+		rt_material_candidates.erase(p_material);
+	}
 }

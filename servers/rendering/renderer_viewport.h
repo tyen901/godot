@@ -99,6 +99,8 @@ public:
 
 		uint64_t time_gpu_begin;
 		uint64_t time_gpu_end;
+		uint64_t time_gpu_begin_frame = UINT64_MAX;
+		double time_gpu_measured = -1.0;
 
 		RID shadow_atlas;
 		int shadow_atlas_size = 2048;
@@ -310,7 +312,7 @@ public:
 	void viewport_set_vrs_update_mode(RID p_viewport, RSE::ViewportVRSUpdateMode p_mode);
 	void viewport_set_vrs_texture(RID p_viewport, RID p_texture);
 
-	void handle_timestamp(String p_timestamp, uint64_t p_cpu_time, uint64_t p_gpu_time);
+	void handle_timestamp(String p_timestamp, uint64_t p_gpu_time, uint64_t p_frame);
 
 	void draw_viewports(bool p_swap_buffers);
 

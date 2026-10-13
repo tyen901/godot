@@ -39,6 +39,7 @@
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
 #include "core/templates/fixed_vector.h"
+#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_include_db.h"
@@ -223,6 +224,27 @@ void RenderingDevice::_free_dependencies(RID p_id) {
 
 		reverse_dependency_map.remove(E);
 	}
+}
+
+void RenderingDevice::_replace_dependency(RID p_dependent, RID p_old_dependency, RID p_new_dependency) {
+	// Remove the edge: p_old_dependency -> p_dependent.
+	{
+		HashSet<RID> *set = dependency_map.getptr(p_old_dependency);
+		if (set) {
+			set->erase(p_dependent);
+		}
+	}
+
+	// Remove the reverse edge: p_dependent -> p_old_dependency.
+	{
+		HashSet<RID> *set = reverse_dependency_map.getptr(p_dependent);
+		if (set) {
+			set->erase(p_old_dependency);
+		}
+	}
+
+	// Add the new edge: p_new_dependency -> p_dependent.
+	_add_dependency(p_dependent, p_new_dependency);
 }
 
 /*******************************/
@@ -544,57 +566,15 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 	ERR_FAIL_NULL_V_MSG(tlas, ERR_INVALID_PARAMETER, "TLAS argument is not valid.");
 	ERR_FAIL_COND_V_MSG(p_instances.size() > tlas->max_instance_count, ERR_INVALID_PARAMETER, "Exceeded the maximum amount of instances allowed in the TLAS.");
 
+	tlas->invalidated = true;
 	Error err = _acceleration_structure_scratch_buffer_create(tlas);
 	ERR_FAIL_COND_V(err != OK, err);
 
 	uint32_t instance_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
-	uint32_t instance_buffer_size = instance_size * tlas->max_instance_count;
-
-	uint32_t instance_buffer_offset = 0;
-	uint32_t instance_buffer_used_size = instance_size * p_instances.size();
-
-	uint32_t instance_buffer_index = UINT32_MAX;
-	for (uint32_t i = 0; i < tlas->instance_buffers.size(); i++) {
-		AccelerationStructure::InstanceBuffer &instance_buffer = tlas->instance_buffers[i];
-
-		if ((frames_drawn - instance_buffer.frame_used) >= frames.size()) {
-			instance_buffer.frame_used = frames_drawn;
-			instance_buffer.used_size = 0;
-		}
-
-		if (frames_drawn == instance_buffer.frame_used && (instance_buffer.used_size + instance_buffer_used_size) <= instance_buffer_size) {
-			instance_buffer_offset = instance_buffer.used_size;
-			instance_buffer.used_size += instance_buffer_used_size;
-			instance_buffer_index = i;
-			break;
-		}
-	}
-
-	if (instance_buffer_index == UINT32_MAX) {
-		RDD::BufferID instance_buffer_driver_id = driver->buffer_create(instance_buffer_size, RDD::BUFFER_USAGE_TRANSFER_FROM_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT | RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT, RDD::MEMORY_ALLOCATION_TYPE_CPU, frames_drawn);
-		ERR_FAIL_COND_V(!instance_buffer_driver_id, ERR_CANT_CREATE);
-
-		uint8_t *data_ptr = driver->buffer_map(instance_buffer_driver_id);
-		if (unlikely(!data_ptr)) {
-			driver->buffer_free(instance_buffer_driver_id);
-			ERR_FAIL_V(ERR_CANT_CREATE);
-		}
-
-		buffer_memory.add(instance_buffer_size);
-
-		AccelerationStructure::InstanceBuffer instance_buffer;
-		instance_buffer.driver_id = instance_buffer_driver_id;
-		instance_buffer.frame_used = frames_drawn;
-		instance_buffer.used_size = 0;
-		instance_buffer.data_ptr = data_ptr;
-
-		instance_buffer_index = tlas->instance_buffers.size();
-		tlas->instance_buffers.push_back(instance_buffer);
-	}
-
-	AccelerationStructure::InstanceBuffer &instance_buffer = tlas->instance_buffers[instance_buffer_index];
 
 	_tlas_remove_blas_dependencies(tlas, p_tlas);
+	tlas->instance_blas.resize(p_instances.size());
+	tlas->blas_reference_counts.clear();
 
 	thread_local LocalVector<RDG::ResourceTracker *> draw_trackers;
 	draw_trackers.clear();
@@ -607,6 +587,8 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 
 	for (uint32_t i = 0; i < p_instances.size(); i++) {
 		const AccelerationStructureInstance &rd_instance = p_instances[i];
+		tlas->instance_blas[i] = rd_instance.blas;
+		if (rd_instance.blas.is_valid()) { tlas->blas_reference_counts[rd_instance.blas]++; }
 
 		RDD::AccelerationStructureInstance rdd_instance;
 		rdd_instance.transform = rd_instance.transform;
@@ -637,12 +619,76 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 		driver->acceleration_structure_instance_write(shadow_buffer.ptr() + (instance_size * i), rdd_instance);
 	}
 
-	memcpy(instance_buffer.data_ptr + instance_buffer_offset, shadow_buffer.ptr(), instance_size * p_instances.size());
-
-	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, instance_buffer.driver_id, instance_buffer_offset, p_instances.size(), tlas->draw_tracker, draw_trackers);
+	const uint32_t byte_count = MAX(1u, uint32_t(shadow_buffer.size()));
+	if (tlas->instance_buffer.is_null()) {
+		tlas->instance_buffer = storage_buffer_create(instance_size * tlas->max_instance_count, {}, 0,
+				BUFFER_CREATION_DEVICE_ADDRESS_BIT | BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+	}
+	ERR_FAIL_COND_V(tlas->instance_buffer.is_null(), ERR_CANT_CREATE);
+	if (shadow_buffer.size()) { ERR_FAIL_COND_V(buffer_update(tlas->instance_buffer, 0, byte_count, shadow_buffer.ptr()) != OK, ERR_CANT_CREATE); }
+	Buffer *input = storage_buffer_owner.get_or_null(tlas->instance_buffer);
+	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, input->driver_id, 0, p_instances.size(), tlas->draw_tracker, draw_trackers, input->draw_tracker);
 
 	tlas->invalidated = false;
 
+	return OK;
+}
+
+Error RenderingDevice::tlas_update_instances(RID p_tlas, Span<AccelerationStructureInstanceRange> p_ranges) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V(draw_list.active || compute_list.active || raytracing_list.active, ERR_INVALID_PARAMETER);
+	AccelerationStructure *tlas = acceleration_structure_owner.get_or_null(p_tlas);
+	ERR_FAIL_NULL_V(tlas, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(tlas->invalidated || tlas->type != ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL || tlas->instance_buffer.is_null(), ERR_INVALID_PARAMETER);
+	// Validate the complete update before changing any native ownership or data.
+	for (const AccelerationStructureInstanceRange &range : p_ranges) {
+		ERR_FAIL_COND_V(uint64_t(range.first) + range.instances.size() > tlas->instance_blas.size(), ERR_INVALID_PARAMETER);
+		for (const AccelerationStructureInstance &instance : range.instances) {
+			ERR_FAIL_COND_V(!instance.hit_sbt_range, ERR_INVALID_PARAMETER);
+			AccelerationStructure *blas = acceleration_structure_owner.get_or_null(instance.blas);
+			ERR_FAIL_COND_V(!blas || blas->invalidated || blas->type != ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL, ERR_INVALID_PARAMETER);
+		}
+	}
+	for (RID id : tlas->acceleration_structure_dependencies) {
+		AccelerationStructure *blas = acceleration_structure_owner.get_or_null(id);
+		ERR_FAIL_COND_V(!blas || blas->invalidated, ERR_INVALID_PARAMETER);
+	}
+	tlas->invalidated = true;
+	const uint32_t instance_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
+	LocalVector<uint8_t> packed;
+	for (const AccelerationStructureInstanceRange &range : p_ranges) {
+		packed.resize(instance_size * range.instances.size());
+		for (uint32_t i = 0; i < range.instances.size(); i++) {
+			const AccelerationStructureInstance &instance = range.instances[i];
+			RID &old = tlas->instance_blas[range.first + i];
+			if (old != instance.blas) {
+				if (old.is_valid() && --tlas->blas_reference_counts[old] == 0) {
+					acceleration_structure_owner.get_or_null(old)->acceleration_structure_dependencies.erase(p_tlas);
+					tlas->acceleration_structure_dependencies.erase(old);
+					tlas->blas_reference_counts.erase(old);
+				}
+				if (tlas->blas_reference_counts[instance.blas]++ == 0) {
+					tlas->acceleration_structure_dependencies.insert(instance.blas);
+					acceleration_structure_owner.get_or_null(instance.blas)->acceleration_structure_dependencies.insert(p_tlas);
+				}
+				old = instance.blas;
+			}
+			RDD::AccelerationStructureInstance native;
+			native.transform = instance.transform; native.id = instance.id; native.mask = instance.mask;
+			native.flags = instance.flags; native.hit_sbt_offset = _decode_hit_sbt_range_offset(instance.hit_sbt_range);
+			native.blas = acceleration_structure_owner.get_or_null(instance.blas)->driver_id;
+			driver->acceleration_structure_instance_write(packed.ptr() + i * instance_size, native);
+		}
+		if (packed.size()) { ERR_FAIL_COND_V(buffer_update(tlas->instance_buffer, range.first * instance_size, packed.size(), packed.ptr()) != OK, ERR_CANT_CREATE); }
+	}
+	LocalVector<RDG::ResourceTracker *> trackers;
+	for (RID id : tlas->acceleration_structure_dependencies) {
+		AccelerationStructure *blas = acceleration_structure_owner.get_or_null(id);
+		if (blas->draw_tracker) { trackers.push_back(blas->draw_tracker); }
+	}
+	Buffer *input = storage_buffer_owner.get_or_null(tlas->instance_buffer);
+	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, input->driver_id, 0, tlas->instance_blas.size(), tlas->draw_tracker, trackers, input->draw_tracker);
+	tlas->invalidated = false;
 	return OK;
 }
 
@@ -4317,6 +4363,7 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 			case SHADER_STAGE_CLOSEST_HIT:
 			case SHADER_STAGE_MISS:
 			case SHADER_STAGE_INTERSECTION:
+			case SHADER_STAGE_CALLABLE:
 				shader->stage_bits.set_flag(RDD::PIPELINE_STAGE_RAY_TRACING_SHADER_BIT);
 				break;
 			default:
@@ -4857,6 +4904,13 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
 	uniform_set.acceleration_structures = acceleration_structures;
 	uniform_set.shader_set = p_shader_set;
 	uniform_set.shader_id = p_shader;
+	uniform_set.is_linear_pool = p_linear_pool;
+
+	// Store the original uniforms so the set can be re-created if a texture is replaced.
+	uniform_set.bound_uniforms.resize(uniform_count);
+	for (uint32_t i = 0; i < uniform_count; i++) {
+		uniform_set.bound_uniforms[i] = uniforms[i];
+	}
 
 	RID id = uniform_set_owner.make_rid(uniform_set);
 #ifdef DEV_ENABLED
@@ -4888,6 +4942,14 @@ void RenderingDevice::uniform_set_set_invalidation_callback(RID p_uniform_set, I
 	ERR_FAIL_NULL(us);
 	us->invalidated_callback = p_callback;
 	us->invalidated_callback_userdata = p_userdata;
+}
+
+void RenderingDevice::uniform_set_set_texture_replacement_callback(RID p_uniform_set, TextureReplacementCallback p_callback, void *p_userdata) {
+	_THREAD_SAFE_METHOD_
+	UniformSet *us = uniform_set_owner.get_or_null(p_uniform_set);
+	ERR_FAIL_NULL(us);
+	us->texture_replaced_callback = p_callback;
+	us->texture_replaced_callback_userdata = p_userdata;
 }
 
 bool RenderingDevice::uniform_sets_have_linear_pools() const {
@@ -5160,7 +5222,7 @@ bool RenderingDevice::compute_pipeline_is_valid(RID p_pipeline) {
 	return compute_pipeline_owner.owns(p_pipeline);
 }
 
-Error RenderingDevice::_raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPipelineID p_raytracing_pipeline, uint32_t p_raygen_shader_count, uint32_t p_miss_shader_count, Buffer &r_sbt_buffer) {
+Error RenderingDevice::_raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPipelineID p_raytracing_pipeline, uint32_t p_raygen_shader_count, uint32_t p_miss_shader_count, uint32_t p_hit_group_count, uint32_t p_callable_shader_count, Buffer &r_sbt_buffer, Span<uint32_t> p_callable_indices) {
 	// Ray generation and miss shader group handles are placed next to each other in the same buffer.
 
 	uint32_t shader_group_handle_size = driver->api_trait_get(RDD::API_TRAIT_SHADER_GROUP_HANDLE_SIZE);
@@ -5176,7 +5238,8 @@ Error RenderingDevice::_raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPip
 	// Reserve handle-aligned slots for miss shaders.
 	uint32_t miss_sbt_size = p_miss_shader_count * shader_group_stride;
 
-	r_sbt_buffer.size = miss_sbt_offset + miss_sbt_size;
+	uint32_t callable_sbt_offset = STEPIFY(miss_sbt_offset + miss_sbt_size, shader_group_base_alignment);
+	r_sbt_buffer.size = p_callable_shader_count ? callable_sbt_offset + p_callable_shader_count * shader_group_stride : miss_sbt_offset + miss_sbt_size;
 	r_sbt_buffer.driver_id = driver->buffer_create(r_sbt_buffer.size, RDD::BUFFER_USAGE_TRANSFER_TO_BIT | RDD::BUFFER_USAGE_SHADER_BINDING_TABLE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
 	ERR_FAIL_COND_V(!r_sbt_buffer.driver_id, ERR_CANT_CREATE);
 
@@ -5205,6 +5268,21 @@ Error RenderingDevice::_raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPip
 		ERR_FAIL_V(ERR_CANT_CREATE);
 	}
 
+	if (p_callable_shader_count) {
+		LocalVector<uint32_t> indices;
+		indices.resize(p_callable_shader_count);
+		for (uint32_t i = 0; i < p_callable_shader_count; i++) {
+			indices[i] = p_callable_indices.is_empty() ? i : p_callable_indices[i];
+		}
+		success = driver->raytracing_pipeline_get_shader_group_handles(p_raytracing_pipeline,
+				p_raygen_shader_count + p_miss_shader_count + p_hit_group_count, VectorView<uint32_t>(indices),
+				sbt_data.ptr() + callable_sbt_offset, shader_group_stride);
+		if (!success) {
+			driver->buffer_free(r_sbt_buffer.driver_id);
+			ERR_FAIL_V(ERR_CANT_CREATE);
+		}
+	}
+
 	Error err = _buffer_initialize(&r_sbt_buffer, sbt_data);
 	if (unlikely(err != OK)) {
 		driver->buffer_free(r_sbt_buffer.driver_id);
@@ -5216,7 +5294,7 @@ Error RenderingDevice::_raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPip
 	return OK;
 }
 
-RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth) {
+RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, Span<PipelineShader> p_callable_shaders, Span<uint32_t> p_callable_indices) {
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE) && !has_feature(SUPPORTS_RAY_QUERY), RID(), "The current rendering device has neither raytracing pipeline nor ray query support.");
 
 	struct PipelineShaderKey : PipelineShader {
@@ -5254,10 +5332,12 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 	thread_local AHashMap<PipelineShaderKey, uint32_t> shader_indices;
 	thread_local LocalVector<uint32_t> raygen_and_miss_shader_indices;
 	thread_local LocalVector<RDD::HitGroup> hit_groups;
+	thread_local LocalVector<uint32_t> callable_shader_indices;
 	shaders.clear();
 	shader_indices.clear();
 	raygen_and_miss_shader_indices.clear();
 	hit_groups.clear();
+	callable_shader_indices.clear();
 
 	RID layout_defining_shader_rid;
 	RDD::ShaderID layout_defining_shader_driver_id;
@@ -5364,6 +5444,12 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 			hit_groups.push_back(rdd_hit_group);
 		}
 
+		for (const PipelineShader &shader : p_callable_shaders) {
+			uint32_t index = _get_shader_index(shader, SHADER_STAGE_CALLABLE);
+			ERR_FAIL_COND_V(index == UINT32_MAX, RID());
+			callable_shader_indices.push_back(index);
+		}
+
 		ERR_FAIL_NULL_V(layout_defining_shader, RID());
 
 		// Snapshot the layout-defining shader's relevant fields under the lock so
@@ -5382,6 +5468,7 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 			VectorView(raygen_and_miss_shader_indices.ptr(), p_raygen_shaders.size()),
 			VectorView(raygen_and_miss_shader_indices.ptr() + p_raygen_shaders.size(), p_miss_shaders.size()),
 			hit_groups,
+			callable_shader_indices,
 			p_max_trace_recursion_depth,
 			layout_defining_shader_driver_id);
 
@@ -5393,7 +5480,7 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 	pipeline.set_formats = layout_defining_shader_set_formats;
 	pipeline.push_constant_size = layout_defining_shader_push_constant_size;
 
-	Error err = _raytracing_pipeline_create_sbt_buffer(pipeline.driver_id, p_raygen_shaders.size(), p_miss_shaders.size(), pipeline.sbt_buffer);
+	Error err = _raytracing_pipeline_create_sbt_buffer(pipeline.driver_id, p_raygen_shaders.size(), p_miss_shaders.size(), p_hit_groups.size(), p_callable_shaders.size(), pipeline.sbt_buffer, p_callable_indices);
 	if (unlikely(err != OK)) {
 		driver->raytracing_pipeline_free(pipeline.driver_id);
 		ERR_FAIL_V(RID());
@@ -5401,6 +5488,7 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 
 	pipeline.raygen_shader_count = p_raygen_shaders.size();
 	pipeline.miss_shader_count = p_miss_shaders.size();
+	pipeline.callable_shader_count = p_callable_shaders.size();
 	pipeline.hit_group_count = p_hit_groups.size();
 
 	// ===== Region 3: locked RID registration =====
@@ -5423,6 +5511,10 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 		for (uint32_t i = 0; i < p_miss_shaders.size(); i++) {
 			_add_dependency(id, p_miss_shaders[i].shader);
 		}
+		for (const PipelineShader &shader : p_callable_shaders) {
+			_add_dependency(id, shader.shader);
+		}
+
 		for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
 			const HitGroup &hit_group = p_hit_groups[i];
 
@@ -6508,6 +6600,7 @@ void RenderingDevice::raytracing_list_bind_raytracing_pipeline(RaytracingListID 
 	raytracing_list.state.sbt_buffer = pipeline->sbt_buffer.driver_id;
 	raytracing_list.state.raygen_shader_count = pipeline->raygen_shader_count;
 	raytracing_list.state.miss_shader_count = pipeline->miss_shader_count;
+	raytracing_list.state.callable_shader_count = pipeline->callable_shader_count;
 
 	draw_graph.add_raytracing_list_bind_pipeline(pipeline->driver_id);
 
@@ -6757,7 +6850,15 @@ void RenderingDevice::raytracing_list_trace_rays(RaytracingListID p_list, uint32
 		draw_graph.add_raytracing_list_usage(hit_sbt->draw_tracker, RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ);
 	}
 
-	draw_graph.add_raytracing_list_trace_rays(raygen_sbt, miss_sbt, rdd_hit_sbt, p_width, p_height, p_depth);
+	RDD::ShaderBindingTable callable_sbt;
+	if (raytracing_list.state.callable_shader_count) {
+		callable_sbt.buffer = raytracing_list.state.sbt_buffer;
+		callable_sbt.offset = STEPIFY(miss_sbt.offset + miss_sbt.size, shader_group_base_alignment);
+		callable_sbt.stride = shader_group_stride;
+		callable_sbt.size = raytracing_list.state.callable_shader_count * shader_group_stride;
+	}
+
+	draw_graph.add_raytracing_list_trace_rays(raygen_sbt, miss_sbt, rdd_hit_sbt, callable_sbt, p_width, p_height, p_depth);
 	raytracing_list.state.trace_count++;
 }
 
@@ -7848,6 +7949,7 @@ void RenderingDevice::_free_internal(RID p_id) {
 			_blas_remove_tlas_dependencies(acceleration_structure, p_id);
 		} else if (acceleration_structure->type == ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
 			_tlas_remove_blas_dependencies(acceleration_structure, p_id);
+			if (acceleration_structure->instance_buffer.is_valid()) { free_rid(acceleration_structure->instance_buffer); }
 		}
 		RDG::resource_tracker_free(acceleration_structure->draw_tracker);
 		frames[frame].acceleration_structures_to_dispose_of.push_back(*acceleration_structure);
@@ -7868,6 +7970,134 @@ void RenderingDevice::_free_internal(RID p_id) {
 		ERR_PRINT("Attempted to free invalid ID: " + itos(p_id.get_id()));
 #endif
 	}
+
+	frames_pending_resources_for_processing = uint32_t(frames.size());
+}
+
+void RenderingDevice::texture_replace_rid(RID p_old_texture, RID p_new_texture) {
+	_THREAD_SAFE_METHOD_
+	ERR_FAIL_COND(p_old_texture == p_new_texture);
+
+	Texture *old_texture = texture_owner.get_or_null(p_old_texture);
+	ERR_FAIL_NULL(old_texture);
+	Texture *new_texture = texture_owner.get_or_null(p_new_texture);
+	ERR_FAIL_NULL(new_texture);
+
+	// We must snapshot the set because we'll be mutating the dependency map.
+	LocalVector<RID> dependent_uniform_sets;
+	{
+		HashSet<RID> *deps = dependency_map.getptr(p_old_texture);
+		if (deps) {
+			for (const RID &dep : *deps) {
+				if (uniform_set_owner.owns(dep)) {
+					dependent_uniform_sets.push_back(dep);
+				}
+			}
+		}
+	}
+
+	// For each dependent uniform set, re-create its driver-level descriptor set
+	// with the new texture, then queue the old descriptor set for deferred deletion.
+	for (const RID &us_rid : dependent_uniform_sets) {
+		UniformSet *us = uniform_set_owner.get_or_null(us_rid);
+		ERR_CONTINUE(!us);
+
+		if (us->bound_uniforms.is_empty()) {
+			// This uniform set wasn't created with stored bindings so it can't be patched.
+			free_rid(us_rid);
+			continue;
+		}
+
+		Shader *shader = shader_owner.get_or_null(us->shader_id);
+		if (!shader || !shader->driver_id) {
+			// Shader is gone; the uniform set is orphaned. Free like normal.
+			free_rid(us_rid);
+			continue;
+		}
+
+		// Patch the bound uniforms.
+		bool patched = false;
+		for (uint32_t i = 0; i < us->bound_uniforms.size(); i++) {
+			Uniform &u = us->bound_uniforms[i];
+			uint32_t id_count = u.get_id_count();
+			for (uint32_t j = 0; j < id_count; j++) {
+				if (u.get_id(j) == p_old_texture) {
+					u.set_id(j, p_new_texture);
+					patched = true;
+				}
+			}
+		}
+
+		if (!patched) {
+			// This set didn't actually reference the old texture. Skip.
+			continue;
+		}
+
+		VectorView<Uniform> uniforms_view(us->bound_uniforms.ptr(), us->bound_uniforms.size());
+		RID new_us_rid = uniform_set_create(uniforms_view, us->shader_id, us->shader_set, us->is_linear_pool);
+
+		if (new_us_rid.is_null()) {
+			ERR_PRINT("Failed to re-create uniform set during texture replacement.");
+			continue;
+		}
+
+		UniformSet *new_us = uniform_set_owner.get_or_null(new_us_rid);
+		ERR_CONTINUE(!new_us);
+
+		// Create a temporary UniformSet with only the driver_id so it gets freed.
+		UniformSet old_us_for_disposal;
+		old_us_for_disposal.driver_id = us->driver_id;
+		frames[frame].uniform_sets_to_dispose_of.push_back(old_us_for_disposal);
+
+		// Copy new data in.
+		us->driver_id = new_us->driver_id;
+		us->format = new_us->format;
+		us->attachable_textures = new_us->attachable_textures;
+		us->draw_trackers = new_us->draw_trackers;
+		us->draw_trackers_usage = new_us->draw_trackers_usage;
+		us->untracked_usage = new_us->untracked_usage;
+		us->shared_textures_to_update = new_us->shared_textures_to_update;
+		us->pending_clear_textures = new_us->pending_clear_textures;
+		us->bound_uniforms = new_us->bound_uniforms;
+
+		// Replace old texture dependency with new.
+		_replace_dependency(us_rid, p_old_texture, p_new_texture);
+
+		// Bindless owners retain slot-to-texture bookkeeping outside the descriptor.
+		// Keep those slots in sync before releasing the replaced texture RID.
+		if (us->texture_replaced_callback) {
+			us->texture_replaced_callback(us->texture_replaced_callback_userdata, p_old_texture, p_new_texture);
+		}
+
+		// Update the UniformSetCacheRD entry if this set was created through the cache.
+		UniformSetCacheRD *const uniform_set_cache = UniformSetCacheRD::get_singleton();
+		if (uniform_set_cache->is_cache_invalidation_callback(us->invalidated_callback)) {
+			uniform_set_cache->texture_replaced_in_uniform_set(us->invalidated_callback_userdata, p_old_texture, p_new_texture);
+		}
+
+		// Since the real driver id is used by the original set, clear the temporary set's driver id.
+		new_us->driver_id = RDD::UniformSetID();
+
+		// Remove its dependency entries and free the temporary RID.
+		HashMap<RID, HashSet<RID>>::Iterator rev_it = reverse_dependency_map.find(new_us_rid);
+		if (rev_it) {
+			for (const RID &dep_on : rev_it->value) {
+				HashSet<RID> *fwd = dependency_map.getptr(dep_on);
+				if (fwd) {
+					fwd->erase(new_us_rid);
+				}
+			}
+			reverse_dependency_map.remove(rev_it);
+		}
+		HashMap<RID, HashSet<RID>>::Iterator fwd_it = dependency_map.find(new_us_rid);
+		if (fwd_it) {
+			dependency_map.remove(fwd_it);
+		}
+
+		uniform_set_owner.free(new_us_rid);
+	}
+
+	free_rid(p_old_texture);
 
 	frames_pending_resources_for_processing = uint32_t(frames.size());
 }
@@ -8068,15 +8298,6 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 			driver->buffer_free(acceleration_structure.scratch_buffer);
 		}
 
-		if (!acceleration_structure.instance_buffers.is_empty()) {
-			uint32_t instance_buffer_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE) * acceleration_structure.max_instance_count;
-			for (AccelerationStructure::InstanceBuffer &instance_buffer : acceleration_structure.instance_buffers) {
-				driver->buffer_unmap(instance_buffer.driver_id);
-				driver->buffer_free(instance_buffer.driver_id);
-			}
-
-			buffer_memory.sub(instance_buffer_size * acceleration_structure.instance_buffers.size());
-		}
 
 		frames[p_frame].acceleration_structures_to_dispose_of.pop_front();
 	}
@@ -9875,6 +10096,7 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADER_STAGE_CLOSEST_HIT);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_MISS);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_INTERSECTION);
+	BIND_ENUM_CONSTANT(SHADER_STAGE_CALLABLE);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_MAX);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_VERTEX_BIT);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_FRAGMENT_BIT);
@@ -9886,6 +10108,7 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADER_STAGE_CLOSEST_HIT_BIT);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_MISS_BIT);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_INTERSECTION_BIT);
+	BIND_ENUM_CONSTANT(SHADER_STAGE_CALLABLE_BIT);
 
 	BIND_ENUM_CONSTANT(SHADER_LANGUAGE_GLSL);
 	BIND_ENUM_CONSTANT(SHADER_LANGUAGE_HLSL);

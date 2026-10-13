@@ -31,6 +31,7 @@
 #pragma once
 
 #include "scene/3d/visual_instance_3d.h"
+#include "scene/resources/material.h"
 
 class Decal : public VisualInstance3D {
 	GDCLASS(Decal, VisualInstance3D);
@@ -48,6 +49,8 @@ private:
 	RID decal;
 	Vector3 size = Vector3(2, 2, 2);
 	Ref<Texture2D> textures[TEXTURE_MAX];
+	Ref<ShaderMaterial> material;
+	Vector4 instance_custom;
 	real_t emission_energy = 1.0;
 	real_t albedo_mix = 1.0;
 	Color modulate = Color(1, 1, 1, 1);
@@ -75,6 +78,11 @@ public:
 
 	void set_texture(DecalTexture p_type, const Ref<Texture2D> &p_texture);
 	Ref<Texture2D> get_texture(DecalTexture p_type) const;
+
+	void set_material(const Ref<ShaderMaterial> &p_material);
+	void set_instance_custom(const Vector4 &p_custom);
+	Vector4 get_instance_custom() const { return instance_custom; }
+	Ref<ShaderMaterial> get_material() const;
 
 	void set_emission_energy(real_t p_energy);
 	real_t get_emission_energy() const;

@@ -247,8 +247,9 @@ protected:
 		uint32_t element_offset = 0;
 		bool use_directional_soft_shadow = false;
 		SceneShaderForwardClustered::ShaderSpecialization base_specialization = {};
+		bool use_material_feedback = false;
 
-		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}) {
+		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}, bool p_use_material_feedback = false) {
 			elements = p_elements;
 			element_info = p_element_info;
 			element_count = p_element_count;
@@ -265,6 +266,7 @@ protected:
 			element_offset = p_element_offset;
 			use_directional_soft_shadow = p_use_directional_soft_shadows;
 			base_specialization = p_base_specialization;
+			use_material_feedback = p_use_material_feedback;
 		}
 	};
 
@@ -344,7 +346,8 @@ protected:
 		struct InstanceData {
 			float transform[12];
 			float compressed_aabb_position[4];
-			float compressed_aabb_size[4];
+			float compressed_aabb_size[3];
+			uint32_t material_feedback_index;
 			float uv_scale[4];
 			uint32_t flags;
 			uint32_t instance_uniforms_ofs; //base offset in global buffer for instance variables
@@ -571,9 +574,12 @@ protected:
 				compilation_dirty_element(this), compilation_all_element(this) {}
 	};
 
+	uint64_t rt_instance_revision = 0;
+
 	class GeometryInstanceForwardClustered : public RenderGeometryInstanceBase {
 	public:
 		/// Heap-allocated procedural RT state. Only created when the instance is procedural.
+		uint64_t rt_revision = 0;
 		RTProceduralState *rt_procedural = nullptr;
 
 		// lightmap
@@ -612,6 +618,7 @@ protected:
 		virtual void _mark_dirty() override;
 
 		virtual void set_transform(const Transform3D &p_transform, const AABB &p_aabb, const AABB &p_transformed_aabb) override;
+		virtual void set_layer_mask(uint32_t p_layer_mask) override;
 		virtual void reset_motion_vectors() override;
 		virtual void set_use_lightmap(RID p_lightmap_instance, const Rect2 &p_lightmap_uv_scale, int p_lightmap_slice_index) override;
 		virtual void set_lightmap_capture(const Color *p_sh9) override;

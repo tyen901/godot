@@ -78,6 +78,7 @@ public:
 	typedef int64_t RaytracingListID;
 
 	typedef void (*InvalidationCallback)(void *);
+	typedef void (*TextureReplacementCallback)(void *, RID, RID);
 
 private:
 	static RenderingDevice *singleton;
@@ -125,6 +126,7 @@ private:
 	void _add_dependency(RID p_id, RID p_depends_on);
 	void _remove_dependency(RID p_id, RID p_depends_on);
 	void _free_dependencies(RID p_id);
+	void _replace_dependency(RID p_dependent, RID p_old_dependency, RID p_new_dependency);
 
 private:
 	/***************************/
@@ -1169,6 +1171,13 @@ private:
 		Vector<RID> acceleration_structures; // Used for validation.
 		InvalidationCallback invalidated_callback = nullptr;
 		void *invalidated_callback_userdata = nullptr;
+
+		TextureReplacementCallback texture_replaced_callback = nullptr;
+		void *texture_replaced_callback_userdata = nullptr;
+
+		// Stored for uniform set re-creation during texture replacement.
+		LocalVector<Uniform> bound_uniforms;
+		bool is_linear_pool = false;
 	};
 
 	RID_Owner<UniformSet, true> uniform_set_owner;
@@ -1190,6 +1199,7 @@ public:
 	RID uniform_set_create(const VectorView<Uniform> &p_uniforms, RID p_shader, uint32_t p_shader_set, bool p_linear_pool = false);
 	bool uniform_set_is_valid(RID p_uniform_set);
 	void uniform_set_set_invalidation_callback(RID p_uniform_set, InvalidationCallback p_callback, void *p_userdata);
+	void uniform_set_set_texture_replacement_callback(RID p_uniform_set, TextureReplacementCallback p_callback, void *p_userdata);
 
 	bool uniform_sets_have_linear_pools() const;
 
@@ -1263,10 +1273,11 @@ private:
 		Buffer sbt_buffer;
 		uint32_t raygen_shader_count = 0;
 		uint32_t miss_shader_count = 0;
+		uint32_t callable_shader_count = 0;
 		uint32_t hit_group_count = 0;
 	};
 
-	Error _raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPipelineID p_raytracing_pipeline, uint32_t p_raygen_shader_count, uint32_t p_miss_shader_count, Buffer &r_sbt_buffer);
+	Error _raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPipelineID p_raytracing_pipeline, uint32_t p_raygen_shader_count, uint32_t p_miss_shader_count, uint32_t p_hit_group_count, uint32_t p_callable_shader_count, Buffer &r_sbt_buffer, Span<uint32_t> p_callable_indices);
 
 	RID_Owner<RaytracingPipeline, true> raytracing_pipeline_owner;
 
@@ -1292,7 +1303,7 @@ public:
 		PipelineShader intersection_shader;
 	};
 
-	RID raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth);
+	RID raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, Span<PipelineShader> p_callable_shaders = {}, Span<uint32_t> p_callable_indices = {});
 	bool raytracing_pipeline_is_valid(RID p_pipeline);
 
 	void update_pipeline_cache(bool p_closing = false);
@@ -1342,14 +1353,9 @@ private:
 		// --- Top Level ---
 		uint32_t max_instance_count = 0;
 
-		struct InstanceBuffer {
-			RDD::BufferID driver_id;
-			uint64_t frame_used = 0;
-			uint32_t used_size = 0;
-			uint8_t *data_ptr = nullptr;
-		};
-
-		LocalVector<InstanceBuffer> instance_buffers;
+		RID instance_buffer;
+		LocalVector<RID> instance_blas;
+		HashMap<RID, uint32_t> blas_reference_counts;
 	};
 
 	Error _acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure);
@@ -1403,6 +1409,7 @@ public:
 	};
 
 	RID blas_create(Span<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags);
+	bool acceleration_structure_is_valid(RID p_structure) const { return acceleration_structure_owner.owns(p_structure); }
 	RID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags);
 
 	typedef int64_t HitShaderBindingTableRange;
@@ -1418,7 +1425,12 @@ public:
 
 	Error blas_build(RID p_blas);
 	Error blas_update(RID p_blas);
+	struct AccelerationStructureInstanceRange {
+		uint32_t first = 0;
+		Span<AccelerationStructureInstance> instances;
+	};
 	Error tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances);
+	Error tlas_update_instances(RID p_tlas, Span<AccelerationStructureInstanceRange> p_ranges);
 
 private:
 	/**********************************/
@@ -1628,6 +1640,7 @@ private:
 			RDD::BufferID sbt_buffer;
 			uint32_t raygen_shader_count = 0;
 			uint32_t miss_shader_count = 0;
+		uint32_t callable_shader_count = 0;
 			uint32_t trace_count = 0;
 		} state;
 
@@ -1930,6 +1943,7 @@ public:
 	void _set_max_fps(int p_max_fps);
 
 	void free_rid(RID p_rid);
+	void texture_replace_rid(RID p_old_texture, RID p_new_texture);
 #ifndef DISABLE_DEPRECATED
 	[[deprecated("Use `free_rid()` instead.")]] void free(RID p_rid) {
 		free_rid(p_rid);

@@ -15,6 +15,7 @@
 
 MaterialData rt_mat = materials[rt_geometry_idx];
 material = CustomMaterialUniforms(rt_mat.uniform_address);
+rt_compute_material_footprint(rt_geometry_idx, rt_hit_pos);
 
 // Matrices.
 mat4 rt_view_matrix = transpose(mat4(scene_data_block.data.view_matrix[0],
@@ -23,11 +24,19 @@ mat4 rt_view_matrix = transpose(mat4(scene_data_block.data.view_matrix[0],
 		vec4(0.0, 0.0, 0.0, 1.0)));
 
 GeometryData rt_geom = geometries[rt_geometry_idx];
+instance_custom = rt_geom.instance_custom;
+rt_instance_uniforms_ofs = rt_geom.instance_uniforms_ofs;
+roughness = 0.5;
+custom0_attrib = rt_custom_attribute(rt_geom, 0u);
+custom1_attrib = rt_custom_attribute(rt_geom, 1u);
+custom2_attrib = rt_custom_attribute(rt_geom, 2u);
+custom3_attrib = rt_custom_attribute(rt_geom, 3u);
 mat4 rt_aabb_xform;
 mat4 rt_inv_aabb_xform;
 get_aabb_compression_xforms(rt_geom, rt_aabb_xform, rt_inv_aabb_xform);
 
 read_model_matrix = mat4(gl_ObjectToWorldEXT) * rt_inv_aabb_xform;
+model_normal_matrix = transpose(inverse(mat3(read_model_matrix)));
 read_view_matrix = rt_view_matrix;
 inv_view_matrix = transpose(mat4(scene_data_block.data.inv_view_matrix[0],
 		scene_data_block.data.inv_view_matrix[1],
@@ -39,9 +48,11 @@ read_viewport_size = scene_data_block.data.viewport_size;
 global_time = scene_data_block.data.time;
 
 mat4 rt_world_to_object_decomp = rt_aabb_xform * mat4(gl_WorldToObjectEXT);
+rt_object_ddx = mat3(rt_world_to_object_decomp) * rt_position_ddx;
+rt_object_ddy = mat3(rt_world_to_object_decomp) * rt_position_ddy;
 
 vertex = (rt_world_to_object_decomp * vec4(rt_hit_pos, 1.0)).xyz;
-normal = mat3(rt_world_to_object_decomp) * rt_normal;
+normal = transpose(mat3(read_model_matrix)) * rt_normal;
 tangent = mat3(rt_world_to_object_decomp) * rt_tangent;
 binormal = mat3(rt_world_to_object_decomp) * rt_bitangent;
 uv_interp = rt_uv;
@@ -58,7 +69,7 @@ rt_frag_coord = vec4(gl_LaunchIDEXT.xy, 0.0, 1.0);
 // Post-vertex transform: object-space -> view-space (mirrors rasterizer post-vertex).
 mat4 rt_modelview = rt_view_matrix * read_model_matrix;
 vertex = (rt_modelview * vec4(vertex, 1.0)).xyz;
-normal = normalize(mat3(rt_modelview) * normal);
+normal = normalize(transpose(inverse(mat3(rt_modelview))) * normal);
 tangent = normalize(mat3(rt_modelview) * tangent);
 binormal = normalize(mat3(rt_modelview) * binormal);
 
@@ -66,7 +77,6 @@ binormal = normalize(mat3(rt_modelview) * binormal);
 vec3 albedo = vec3(1.0);
 float alpha = 1.0;
 float metallic = 0.0;
-float roughness = 0.5;
 float specular = 0.5;
 vec3 emission = vec3(0.0);
 vec3 normal_map = vec3(0.5, 0.5, 1.0);
@@ -74,6 +84,7 @@ float normal_map_depth = 1.0;
 float ao = 1.0;
 float ao_light_affect = 0.0;
 vec3 backlight = vec3(0.0);
+float transmission = 0.0;
 float sss_strength = 0.0;
 float rim = 0.0;
 float rim_tint = 0.0;
@@ -89,3 +100,11 @@ vec2 alpha_texture_coordinate = vec2(0.0);
 {
 	/* RT_CUSTOM_FRAGMENT_CODE */
 }
+
+#if defined(TEXTURE_STREAMING) && defined(RT_STAGE_CLOSEST_HIT)
+#ifdef STREAMING_LOD_USED
+rt_write_material_feedback(rt_mat.material_feedback_index, streaming_footprint_sq_from_lod(streaming_lod));
+#else
+rt_write_material_feedback(rt_mat.material_feedback_index, streaming_footprint_sq(rt_uv_ddx, rt_uv_ddy));
+#endif
+#endif

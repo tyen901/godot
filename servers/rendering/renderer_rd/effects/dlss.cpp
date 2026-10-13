@@ -47,6 +47,8 @@ using namespace RendererRD;
 // Texture layout/state constants (avoid including Vulkan/D3D12 headers here).
 static constexpr uint64_t DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY = 5;
 static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR = 0x40;
+static constexpr uint64_t DLSS_VK_IMAGE_LAYOUT_GENERAL = 1; // The layout of a read-write storage image.
+static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_UNORDERED_ACCESS = 0x8;
 static constexpr float DLSS_OPTIMAL_MODE_MAX_DISTANCE = 1000000.0f;
 namespace RendererRD {
 class DLSSContextInner : public DLSSContext {
@@ -292,6 +294,8 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 	for (int i = 0; i < num_resources; i++) {
 		res[i].usage = RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE;
 	}
+	// res[1] is the output, which DLSS writes. Declared as sampled, the render graph would not order later reads of it (the tonemap) after this callback.
+	res[1].usage = RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE;
 	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)DLSSEffect::_upscale_internal_graph_callback, p_params.context, VectorView<RD::CallbackResource>(res, num_resources));
 }
 
@@ -313,6 +317,10 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		uint64_t texture_state = DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY;
 		if (context->is_d3d12) {
 			texture_state = DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR;
+		}
+		if (bufferType == sl::kBufferTypeScalingOutputColor) {
+			// The graph hands the output over as a read-write storage image (see upscale()).
+			texture_state = context->is_d3d12 ? DLSS_D3D12_RESOURCE_STATE_UNORDERED_ACCESS : DLSS_VK_IMAGE_LAYOUT_GENERAL;
 		}
 		uint64_t texture_vkformat = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, textureRID);
 		uint64_t texture_usage_flags = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, textureRID);
@@ -422,7 +430,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		context->constants.clipToCameraView = sl_convert_matrix(p_params.cam_projection.inverse()); // projection mtx (unjittered, inverted)
 		context->constants.clipToLensClip = mtxIdentity; // keep identity unless some lens distortion is applied
 		context->constants.clipToPrevClip = sl_convert_matrix(p_params.reprojection); // reprojection matrix
-		context->constants.prevClipToClip = sl_convert_matrix(p_params.reprojection.inverse()); // inverted reprojection matrix
+		context->constants.prevClipToClip = sl_convert_matrix(p_params.inverse_reprojection); // inverted reprojection matrix
 
 		context->constants.cameraPos = sl_convert_vector(p_params.cam_transform.get_origin());
 		context->constants.cameraFwd = sl_convert_vector(-p_params.cam_transform.get_basis().rows[2]);

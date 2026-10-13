@@ -2287,6 +2287,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("texture_drawable_get_default_material"), &RenderingServer::texture_drawable_get_default_material);
 
 	ClassDB::bind_method(D_METHOD("texture_replace", "texture", "by_texture"), &RenderingServer::texture_replace);
+	ClassDB::bind_method(D_METHOD("texture_replace_compatible", "texture", "by_texture"), &RenderingServer::texture_replace_compatible);
 	ClassDB::bind_method(D_METHOD("texture_set_size_override", "texture", "width", "height"), &RenderingServer::texture_set_size_override);
 
 	ClassDB::bind_method(D_METHOD("texture_set_path", "texture", "path"), &RenderingServer::texture_set_path);
@@ -2651,6 +2652,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("decal_set_distance_fade", "decal", "enabled", "begin", "length"), &RenderingServer::decal_set_distance_fade);
 	ClassDB::bind_method(D_METHOD("decal_set_fade", "decal", "above", "below"), &RenderingServer::decal_set_fade);
 	ClassDB::bind_method(D_METHOD("decal_set_normal_fade", "decal", "fade"), &RenderingServer::decal_set_normal_fade);
+	ClassDB::bind_method(D_METHOD("decal_set_material", "decal", "material"), &RenderingServer::decal_set_material);
+	ClassDB::bind_method(D_METHOD("decal_set_instance_custom", "decal", "custom"), &RenderingServer::decal_set_instance_custom);
 
 	ClassDB::bind_method(D_METHOD("decals_set_filter", "filter"), &RenderingServer::decals_set_filter);
 
@@ -2987,6 +2990,10 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_BLAS_REFITS);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_TRIANGLES_BUILT);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_TRIANGLES_REFIT);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_SHADER_GROUPS);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_SHADER_GROUPS_READY);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_SHADER_GROUPS_FAILED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_SCENE_READY);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE);
@@ -3831,6 +3838,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST("rendering/pathtracing/multimesh_cache_cpu_transforms", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/deformed_mesh_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,3600,1"), 60);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/multimesh_blas_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,18000,1"), 3600);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/mesh_blas_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,18000,1"), 3600);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/multimesh_merged_blas_max_triangles", PROPERTY_HINT_RANGE, "256,1048576,1"), 65536);
 
 	// OpenGL limits

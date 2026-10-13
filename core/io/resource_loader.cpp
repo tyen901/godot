@@ -272,6 +272,10 @@ ResourceLoader::LoadToken::~LoadToken() {
 	clear();
 }
 
+void ResourceLoader::LoadToken::delete_self() {
+	memdelete(this);
+}
+
 Ref<Resource> ResourceLoader::_load(const String &p_path, const String &p_original_path, const String &p_type_hint, CacheMode p_cache_mode, Error *r_error, bool p_use_sub_threads, float *r_progress) {
 	const String &original_path = p_original_path.is_empty() ? p_path : p_original_path;
 	load_nesting++;
@@ -344,6 +348,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		MutexLock thread_load_lock(thread_load_mutex);
 		if (cleaning_tasks) {
 			load_task.status = THREAD_LOAD_FAILED;
+			active_load_serials.erase(load_task.load_serial);
 			return;
 		}
 
@@ -498,6 +503,8 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		}
 
 		if (cleaning_tasks) {
+			MutexLock thread_load_lock(thread_load_mutex);
+			active_load_serials.erase(load_task.load_serial);
 			load_task.status = THREAD_LOAD_FAILED;
 			// Do not attempt to unreference the load token. Many things are
 			// tearing down concurrently and our task might be dead already. If it is
@@ -506,7 +513,6 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		}
 
 		if (status != THREAD_LOAD_IN_PROGRESS) {
-			load_task.load_token->unreference();
 			thread_load_mutex.lock();
 			if (thread_waiting_on_backup.is_empty()) {
 				thread_waiting_on.erase(thread_index);
@@ -514,6 +520,12 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 				thread_waiting_on[thread_index] = thread_waiting_on_backup;
 			}
 			thread_load_mutex.unlock();
+			// Destruction can await the scheduled task. Retire the final worker
+			// reference on the main queue, after all task access has finished.
+			LoadToken *token = load_task.load_token;
+			if (token->unreference()) {
+				MessageQueue::get_main_singleton()->push_callable(callable_mp(token, &LoadToken::delete_self));
+			}
 			return;
 		}
 
@@ -643,6 +655,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		// And don't unreference the load token, it will get destroyed
 		// with the task later.
 		load_task.status = THREAD_LOAD_FAILED;
+		active_load_serials.erase(load_task.load_serial);
 		thread_load_mutex.unlock();
 		return;
 	}
@@ -652,6 +665,8 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 	} else {
 		load_task.status = THREAD_LOAD_LOADED;
 	}
+
+	active_load_serials.erase(load_task.load_serial);
 
 	if (load_task.cond_var && load_task.need_wait) {
 		load_task.cond_var->notify_all();
@@ -671,9 +686,6 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 
 	thread_load_mutex.unlock();
 
-	// It's safe now to let the task go in case no one else was grabbing the token.
-	load_task.load_token->unreference();
-
 	if (load_nesting == 0) {
 		if (own_mq_override) {
 			MessageQueue::set_thread_singleton_override(nullptr);
@@ -684,6 +696,13 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 	curr_load_task = curr_load_task_backup;
 
 	print_verbose(vformat("Completed load for: '%s' remapped '%s' at thread %d", load_task.local_path, remapped_path, thread_index));
+
+	// The caller may already have released its reference after observing LOADED.
+	// Delete on the main queue to avoid awaiting our own scheduled worker task.
+	LoadToken *token = load_task.load_token;
+	if (token->unreference()) {
+		MessageQueue::get_main_singleton()->push_callable(callable_mp(token, &LoadToken::delete_self));
+	}
 }
 
 String ResourceLoader::_validate_local_path(const String &p_path) {
@@ -827,6 +846,9 @@ Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path,
 				load_task_ptr = &E->value;
 			}
 		}
+
+		load_task_ptr->load_serial = ++load_serial;
+		active_load_serials.insert(load_task_ptr->load_serial);
 
 		// It's important to keep the token alive because until the load completes,
 		// which includes before the thread start, it may happen that no one is grabbing
@@ -1628,14 +1650,24 @@ void ResourceLoader::clear_thread_load_tasks() {
 		DEV_ASSERT(user_token->user_rc > 0 && !user_token->user_path.is_empty());
 		user_token->user_path.clear();
 		user_token->user_rc = 0;
-		user_token->unreference();
+		if (user_token->unreference()) {
+			MessageQueue::get_main_singleton()->push_callable(callable_mp(user_token, &LoadToken::delete_self));
+		}
 	}
 
+	// Shutdown owns retirement of these task records. A terminal token queued
+	// for destruction must not look them up after the map has been cleared.
+	for (KeyValue<String, ResourceLoader::ThreadLoadTask> &E : thread_load_tasks) {
+		E.value.load_token->local_path.clear();
+	}
 	thread_load_tasks.clear();
+	active_load_serials.clear();
 	thread_waiting_on.clear();
 	// yielders is already guaranteed to be empty now
 
 	cleaning_tasks = false;
+	thread_load_lock.temp_unlock();
+	MessageQueue::get_main_singleton()->flush();
 }
 
 void ResourceLoader::set_load_callback(ResourceLoadedCallback p_callback) {
@@ -1806,3 +1838,21 @@ SelfList<Resource>::List ResourceLoader::remapped_list;
 HashMap<String, Vector<String>> ResourceLoader::translation_remaps;
 
 ResourceLoaderImport ResourceLoader::import = nullptr;
+
+uint64_t ResourceLoader::load_serial = 0;
+HashSet<uint64_t> ResourceLoader::active_load_serials;
+
+uint64_t ResourceLoader::get_loading_barrier() {
+	MutexLock lock(thread_load_mutex);
+	return load_serial;
+}
+
+bool ResourceLoader::is_loading_before(uint64_t p_barrier) {
+	MutexLock lock(thread_load_mutex);
+	for (uint64_t serial : active_load_serials) {
+		if (serial <= p_barrier) {
+			return true;
+		}
+	}
+	return false;
+}

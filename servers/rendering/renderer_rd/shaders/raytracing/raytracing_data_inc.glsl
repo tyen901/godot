@@ -12,7 +12,7 @@ layout(buffer_reference, std430) readonly buffer Uint32Buffer {
 };
 
 // ============================================================================
-// GEOMETRY DATA (matches C++ RT_GeometryData, 128 bytes)
+// GEOMETRY DATA (matches C++ RT_GeometryData, 144 bytes)
 // ============================================================================
 struct GeometryData {
 	uint64_t vertex_address;
@@ -48,7 +48,11 @@ struct GeometryData {
 	uint prev_vertex_address_lo;
 	uint prev_vertex_address_hi;
 
-	uint _pad[5];
+	uint custom_attribute[4];
+	uint instance_uniforms_ofs;
+	vec4 instance_custom;
+	uint layer_mask;
+	uint decal_pad0; uint decal_pad1; uint decal_pad2;
 };
 
 void get_aabb_compression_xforms(GeometryData geom, out mat4 aabb_xform, out mat4 inv_aabb_xform) {
@@ -80,7 +84,7 @@ struct InstanceMotionData {
 };
 
 // ============================================================================
-// MATERIAL DATA (matches C++ layout, 96 bytes)
+// MATERIAL DATA (matches C++ layout, 112 bytes)
 // ============================================================================
 struct MaterialData {
 	uint albedo_texture_idx;
@@ -103,4 +107,8 @@ struct MaterialData {
 	float normal_map_depth; // Normal map strength (default 1.0)
 	float specular; // Dielectric specular [0..1], default 0.5 -> F0 = 0.04.
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none)
+	uint material_feedback_index;
+	uint material_feedback_pad0;
+	uint material_feedback_pad1;
+	uint material_feedback_pad2;
 };

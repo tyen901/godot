@@ -440,7 +440,10 @@ void debug_visualize(
 
 /// Production shading: emissive + NEE direct lighting + BRDF importance sampling + next bounce.
 /// Also handles DLSS-RR G-buffer output on primary ray.
+#include "raytracing_decals_inc.glsl"
+
 void shade_and_bounce(HitData h, MaterialResult m) {
+	apply_rt_decals(h, m);
 	PathState ps = path_unpack(payload);
 
 	vec3 V = -gl_WorldRayDirectionEXT;
@@ -472,7 +475,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	brdf_mat.roughness = m.roughness;
 	brdf_mat.dielectricF0 = specular_to_f0(m.specular);
 	brdf_mat.emissive = m.emissive;
-	brdf_mat.transmissivness = 0.0;
+	brdf_mat.transmissivness = clamp(m.transmission, 0.0, 1.0);
 	brdf_mat.opacity = 1.0;
 
 	vec3 specularF0 = baseColorToSpecularF0(brdf_mat.baseColor, brdf_mat.metalness, brdf_mat.dielectricF0);

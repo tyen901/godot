@@ -44,6 +44,21 @@ Vector3 Decal::get_size() const {
 	return size;
 }
 
+void Decal::set_instance_custom(const Vector4 &p_custom) {
+	instance_custom = p_custom;
+	RS::get_singleton()->decal_set_instance_custom(decal, p_custom);
+}
+
+void Decal::set_material(const Ref<ShaderMaterial> &p_material) {
+	material = p_material;
+	RS::get_singleton()->decal_set_material(decal, material.is_valid() ? material->get_rid() : RID());
+	update_configuration_warnings();
+}
+
+Ref<ShaderMaterial> Decal::get_material() const {
+	return material;
+}
+
 void Decal::set_texture(DecalTexture p_type, const Ref<Texture2D> &p_texture) {
 	ERR_FAIL_INDEX(p_type, TEXTURE_MAX);
 	textures[p_type] = p_texture;
@@ -184,7 +199,7 @@ PackedStringArray Decal::get_configuration_warnings() const {
 		return warnings;
 	}
 
-	if (textures[TEXTURE_ALBEDO].is_null() && textures[TEXTURE_NORMAL].is_null() && textures[TEXTURE_ORM].is_null() && textures[TEXTURE_EMISSION].is_null()) {
+	if (material.is_null() && textures[TEXTURE_ALBEDO].is_null() && textures[TEXTURE_NORMAL].is_null() && textures[TEXTURE_ORM].is_null() && textures[TEXTURE_EMISSION].is_null()) {
 		warnings.push_back(RTR("The decal has no textures loaded into any of its texture properties, and will therefore not be visible."));
 	}
 
@@ -204,6 +219,12 @@ void Decal::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_size"), &Decal::get_size);
 
 	ClassDB::bind_method(D_METHOD("set_texture", "type", "texture"), &Decal::set_texture);
+	ClassDB::bind_method(D_METHOD("set_material", "material"), &Decal::set_material);
+	ClassDB::bind_method(D_METHOD("set_instance_custom", "custom"), &Decal::set_instance_custom);
+	ClassDB::bind_method(D_METHOD("get_instance_custom"), &Decal::get_instance_custom);
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR4, "instance_custom"), "set_instance_custom", "get_instance_custom");
+	ClassDB::bind_method(D_METHOD("get_material"), &Decal::get_material);
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "material", PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial"), "set_material", "get_material");
 	ClassDB::bind_method(D_METHOD("get_texture", "type"), &Decal::get_texture);
 
 	ClassDB::bind_method(D_METHOD("set_emission_energy", "energy"), &Decal::set_emission_energy);
@@ -240,7 +261,7 @@ void Decal::_bind_methods() {
 
 	ADD_GROUP("Textures", "texture_");
 	// Only allow texture types that display correctly.
-	const String texture_hint = "Texture2D,-AnimatedTexture,-AtlasTexture,-CameraTexture,-CanvasTexture,-MeshTexture,-Texture2DRD,-ViewportTexture";
+	const String texture_hint = "Texture2D,-AnimatedTexture,-AtlasTexture,-CameraTexture,-CanvasTexture,-MeshTexture,-Texture2DRD,-ViewportTexture,-StreamedTexture2D";
 	ADD_PROPERTYI(PropertyInfo(Variant::OBJECT, "texture_albedo", PROPERTY_HINT_RESOURCE_TYPE, texture_hint), "set_texture", "get_texture", TEXTURE_ALBEDO);
 	ADD_PROPERTYI(PropertyInfo(Variant::OBJECT, "texture_normal", PROPERTY_HINT_RESOURCE_TYPE, texture_hint), "set_texture", "get_texture", TEXTURE_NORMAL);
 	ADD_PROPERTYI(PropertyInfo(Variant::OBJECT, "texture_orm", PROPERTY_HINT_RESOURCE_TYPE, texture_hint), "set_texture", "get_texture", TEXTURE_ORM);

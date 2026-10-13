@@ -202,6 +202,8 @@ private:
 
 		CanvasTexture *canvas_texture = nullptr;
 
+		RID streaming_state;
+
 		void cleanup();
 	};
 
@@ -331,6 +333,8 @@ private:
 	} decal_atlas;
 
 	struct Decal {
+		RID material;
+		Vector4 instance_custom;
 		Vector3 size = Vector3(2, 2, 2);
 		RID textures[RSE::DECAL_TEXTURE_MAX];
 		float emission_energy = 1.0;
@@ -348,6 +352,7 @@ private:
 	};
 
 	mutable RID_Owner<Decal, true> decal_owner;
+	uint64_t rt_decal_revision = 0;
 
 	/* DECAL INSTANCE */
 
@@ -622,6 +627,7 @@ public:
 	virtual RID texture_drawable_get_default_material() const override;
 
 	virtual void texture_replace(RID p_texture, RID p_by_texture) override;
+	virtual void texture_replace_compatible(RID p_texture, RID p_by_texture) override;
 	virtual void texture_set_size_override(RID p_texture, int p_width, int p_height) override;
 
 	virtual void texture_set_path(RID p_texture, const String &p_path) override;
@@ -640,6 +646,7 @@ public:
 	virtual Size2 texture_size_with_proxy(RID p_proxy) override;
 
 	virtual void texture_rd_initialize(RID p_texture, const RID &p_rd_texture, const RSE::TextureLayeredType p_layer_type = RSE::TEXTURE_LAYERED_2D_ARRAY) override;
+
 	virtual RID texture_get_rd_texture(RID p_texture, bool p_srgb = false) const override;
 	virtual uint64_t texture_get_native_handle(RID p_texture, bool p_srgb = false) const override;
 
@@ -802,6 +809,25 @@ public:
 	virtual uint32_t decal_get_cull_mask(RID p_decal) const override;
 	Dependency *decal_get_dependency(RID p_decal);
 
+	struct RTDecal {
+		RID material;
+		Vector4 instance_custom;
+		RID textures[RSE::DECAL_TEXTURE_MAX];
+		Transform3D transform;
+		Vector3 size;
+		Color modulate;
+		uint32_t cull_mask = 0;
+		float sorting_offset = 0.0;
+		float albedo_mix = 1.0, emission_energy = 1.0;
+		float upper_fade = 0.0, lower_fade = 0.0, normal_fade = 0.0;
+		bool distance_fade = false;
+		float distance_fade_begin = 0.0, distance_fade_length = 0.0;
+	};
+	bool decal_instance_get_rt_data(RID p_instance, RTDecal &r_data) const;
+	void decal_set_material(RID p_decal, RID p_material) override;
+	void decal_set_instance_custom(RID p_decal, const Vector4 &p_custom) override;
+	uint64_t get_rt_decal_revision() const { return rt_decal_revision; }
+
 	/* DECAL INSTANCE API */
 
 	bool owns_decal_instance(RID p_rid) const { return decal_instance_owner.owns(p_rid); }
@@ -933,6 +959,8 @@ public:
 
 	static RD::DataFormat render_target_get_color_format(bool p_use_hdr, bool p_srgb);
 	static uint32_t render_target_get_color_usage_bits(bool p_msaa);
+
+	virtual void texture_2d_attach_streaming_state(RID p_texture, RID p_streaming_state) override;
 };
 
 } // namespace RendererRD

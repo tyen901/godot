@@ -51,6 +51,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	}
 
 	ShaderCompiler::GeneratedCode gen_code;
+	is_decal = false;
 
 	blend_mode = BLEND_MODE_MIX;
 	depth_test_disabledi = 0;
@@ -96,6 +97,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.entry_point_stages["vertex"] = ShaderCompiler::STAGE_VERTEX;
 	actions.entry_point_stages["fragment"] = ShaderCompiler::STAGE_FRAGMENT;
 	actions.entry_point_stages["light"] = ShaderCompiler::STAGE_FRAGMENT;
+	actions.entry_point_stages["intersection"] = ShaderCompiler::STAGE_FRAGMENT;
 
 	actions.render_mode_values["blend_add"] = Pair<int *, int>(&blend_mode, BLEND_MODE_ADD);
 	actions.render_mode_values["blend_mix"] = Pair<int *, int>(&blend_mode, BLEND_MODE_MIX);
@@ -118,6 +120,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_values["cull_back"] = Pair<int *, int>(&cull_modei, RSE::CULL_MODE_BACK);
 
 	actions.render_mode_flags["unshaded"] = &unshaded;
+	actions.render_mode_flags["decal"] = &is_decal;
 	actions.render_mode_flags["wireframe"] = &wireframe;
 	actions.render_mode_flags["particle_trails"] = &uses_particle_trails;
 	actions.render_mode_flags["world_vertex_coords"] = &uses_world_coordinates;
@@ -185,7 +188,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		ERR_FAIL_MSG("Shader compilation failed.");
 	}
 
-	if (version.is_null()) {
+	if (!is_decal && version.is_null()) {
 		version = SceneShaderForwardClustered::singleton->shader.version_create(false);
 	}
 
@@ -202,6 +205,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_screen_texture = gen_code.uses_screen_texture;
 	uses_depth_texture = gen_code.uses_depth_texture;
 	uses_normal_texture = gen_code.uses_normal_roughness_texture;
+	rt_is_procedural = gen_code.code.has("intersection") && !gen_code.code["intersection"].is_empty();
 	uses_vertex_time = gen_code.uses_vertex_time;
 	uses_fragment_time = gen_code.uses_fragment_time;
 	uses_normal |= uses_normal_map;
@@ -233,7 +237,16 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 #endif
 	pipeline_hash_map.clear_pipelines();
 
-	SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
+	// Decal materials execute as RTX callables, never as raster geometry.
+	// Retain native uniform metadata without compiling an unused raster pipeline.
+	if (is_decal) {
+		if (version.is_valid()) {
+			SceneShaderForwardClustered::singleton->shader.version_free(version);
+			version = RID();
+		}
+	} else {
+		SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
+	}
 
 	ubo_size = gen_code.uniform_total_size;
 	ubo_offsets = gen_code.uniform_offsets;
@@ -274,6 +287,7 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 	actions.entry_point_stages["vertex"] = ShaderCompiler::STAGE_VERTEX;
 	actions.entry_point_stages["fragment"] = ShaderCompiler::STAGE_FRAGMENT;
 	actions.entry_point_stages["light"] = ShaderCompiler::STAGE_FRAGMENT;
+	actions.entry_point_stages["intersection"] = ShaderCompiler::STAGE_FRAGMENT;
 
 	// Only the inputs that influence `rt_uses_alpha_pass` / `rt_uses_depth_in_alpha_pass`.
 	actions.render_mode_values["blend_add"] = Pair<int *, int>(&blend_modei, BLEND_MODE_ADD);
@@ -350,6 +364,7 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 	rt->uses_depth_prepass_alpha = local_uses_depth_prepass_alpha;
 	rt->uses_blend_alpha = blend_mode_uses_blend_alpha(BlendMode(rt->blend_mode));
 
+	rt_is_procedural = rt_gen_code.code.has("intersection") && !rt_gen_code.code["intersection"].is_empty();
 	rt->uses_screen_texture = rt_gen_code.uses_screen_texture;
 	rt->uses_depth_texture = rt_gen_code.uses_depth_texture;
 	rt->uses_normal_texture = rt_gen_code.uses_normal_roughness_texture;
@@ -513,7 +528,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 		depth_stencil_state.back_op = op;
 	}
 
-	bool depth_pre_pass_enabled = bool(GLOBAL_GET_CACHED(bool, "rendering/driver/depth_prepass/enable"));
+	const bool depth_pre_pass_enabled = SceneShaderForwardClustered::singleton->depth_prepass_enabled;
 
 	RD::RenderPrimitive primitive_rd_table[RSE::PRIMITIVE_MAX] = {
 		RD::RENDER_PRIMITIVE_POINTS,
@@ -739,6 +754,7 @@ SceneShaderForwardClustered::~SceneShaderForwardClustered() {
 
 	RD::get_singleton()->free_rid(default_vec4_xform_buffer);
 	RD::get_singleton()->free_rid(shadow_sampler);
+	RD::get_singleton()->free_rid(default_material_feedback_buffer);
 
 	material_storage->shader_free(overdraw_material_shader);
 	material_storage->shader_free(default_shader);
@@ -753,6 +769,8 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
 	emulate_point_size = !RD::get_singleton()->has_feature(RD::SUPPORTS_POINT_SIZE);
+
+	depth_prepass_enabled = GLOBAL_GET("rendering/driver/depth_prepass/enable");
 
 	{
 		Vector<ShaderRD::VariantDefine> shader_versions;
@@ -832,7 +850,14 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.renames["BINORMAL"] = "binormal";
 		actions.renames["POSITION"] = "position";
 		actions.renames["UV"] = "uv_interp";
+		actions.renames["STREAMING_LOD"] = "streaming_lod";
 		actions.renames["UV2"] = "uv2_interp";
+		actions.renames["UV_DDX"] = "dFdxCoarse(uv_interp)";
+		actions.renames["UV_DDY"] = "dFdyCoarse(uv_interp)";
+		actions.renames["POSITION_OBJECT_DDX"] = "(inverse(mat3(transpose(mat4(instances.data[instance_index_interp].transform[0], instances.data[instance_index_interp].transform[1], instances.data[instance_index_interp].transform[2], vec4(0.0, 0.0, 0.0, 1.0))))) * mat3(transpose(mat4(scene_data_block.data.inv_view_matrix[0], scene_data_block.data.inv_view_matrix[1], scene_data_block.data.inv_view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)))) * dFdxCoarse(vertex_interp))";
+		actions.renames["POSITION_OBJECT_DDY"] = "(inverse(mat3(transpose(mat4(instances.data[instance_index_interp].transform[0], instances.data[instance_index_interp].transform[1], instances.data[instance_index_interp].transform[2], vec4(0.0, 0.0, 0.0, 1.0))))) * mat3(transpose(mat4(scene_data_block.data.inv_view_matrix[0], scene_data_block.data.inv_view_matrix[1], scene_data_block.data.inv_view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)))) * dFdyCoarse(vertex_interp))";
+		actions.renames["POSITION_WORLD_DDX"] = "(mat3(transpose(mat4(scene_data_block.data.inv_view_matrix[0], scene_data_block.data.inv_view_matrix[1], scene_data_block.data.inv_view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)))) * dFdxCoarse(vertex_interp))";
+		actions.renames["POSITION_WORLD_DDY"] = "(mat3(transpose(mat4(scene_data_block.data.inv_view_matrix[0], scene_data_block.data.inv_view_matrix[1], scene_data_block.data.inv_view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)))) * dFdyCoarse(vertex_interp))";
 		actions.renames["COLOR"] = "color_interp";
 		actions.renames["POINT_SIZE"] = "point_size";
 		actions.renames["INSTANCE_ID"] = "INSTANCE_INDEX";
@@ -935,6 +960,8 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.usage_defines["AO_LIGHT_AFFECT"] = "#define AO_USED\n";
 		actions.usage_defines["UV"] = "#define UV_USED\n";
 		actions.usage_defines["UV2"] = "#define UV2_USED\n";
+		actions.usage_defines["UV_DDX"] = "#define UV_USED\n";
+		actions.usage_defines["UV_DDY"] = "#define UV_USED\n";
 		actions.usage_defines["BONE_INDICES"] = "#define BONES_USED\n";
 		actions.usage_defines["BONE_WEIGHTS"] = "#define WEIGHTS_USED\n";
 		actions.usage_defines["CUSTOM0"] = "#define CUSTOM0_USED\n";
@@ -973,6 +1000,11 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.usage_defines["POINT_SIZE"] = "#define POINT_SIZE_USED\n";
 		actions.usage_defines["POINT_COORD"] = "#define POINT_COORD_USED\n";
 
+		actions.usage_defines["DISCARD"] = "#define DISCARD_USED\n";
+		actions.usage_defines["DEPTH"] = "#define DEPTH_USED\n";
+
+		actions.usage_defines["STREAMING_LOD"] = "#define STREAMING_LOD_USED\n";
+
 		actions.render_mode_defines["skip_vertex_transform"] = "#define SKIP_TRANSFORM_USED\n";
 		actions.render_mode_defines["world_vertex_coords"] = "#define VERTEX_WORLD_COORDS_USED\n";
 		actions.render_mode_defines["ensure_correct_normals"] = "#define ENSURE_CORRECT_NORMALS\n";
@@ -980,6 +1012,12 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.render_mode_defines["cull_disabled"] = "#define DO_SIDE_CHECK\n";
 		actions.render_mode_defines["particle_trails"] = "#define USE_PARTICLE_TRAILS\n";
 		actions.render_mode_defines["depth_prepass_alpha"] = "#define USE_OPAQUE_PREPASS\n";
+
+		actions.render_mode_defines["depth_draw_never"] = "#define DEPTH_DRAW_NEVER_USED\n";
+		actions.render_mode_defines["depth_draw_always"] = "#define DEPTH_DRAW_ALWAYS_USED\n";
+		actions.render_mode_defines["depth_test_disabled"] = "#define DEPTH_TEST_DISABLED_USED\n";
+		actions.stencil_mode_defines["write"] = "#define STENCIL_WRITE_USED\n";
+		actions.stencil_mode_defines["write_depth_fail"] = "#define STENCIL_WRITE_USED\n";
 
 		bool force_lambert = GLOBAL_GET("rendering/shading/overrides/force_lambert_over_burley");
 
@@ -1107,6 +1145,7 @@ void fragment() {
 
 	{
 		default_vec4_xform_buffer = RD::get_singleton()->storage_buffer_create(256);
+		default_material_feedback_buffer = RD::get_singleton()->storage_buffer_create(256);
 		Vector<RD::Uniform> uniforms;
 		RD::Uniform u;
 		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;

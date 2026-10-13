@@ -55,6 +55,7 @@ public:
 	~BindlessBlock();
 
 private:
+	static void _texture_replaced(void *p_userdata, RID p_old_texture, RID p_new_texture);
 	RenderingDevice *rd = nullptr;
 	LocalVector<RID> textures;
 	HashMap<RID, uint32_t> texture_to_index;

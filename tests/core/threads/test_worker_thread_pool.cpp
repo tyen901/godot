@@ -399,7 +399,7 @@ TEST_CASE("[WorkerThreadPool] Native completion keeps exact ownership across for
 	CHECK(fixture.outer_returned.is_set());
 }
 
-struct NativeCompletionPumpSkip {
+struct NativeCompletionPumpSkip : public Object {
 	WorkerThreadPool *pool = nullptr;
 	WorkerThreadPool::NativeCompletion completion;
 	Semaphore caller_entered;

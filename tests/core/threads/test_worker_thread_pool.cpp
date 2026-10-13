@@ -264,6 +264,226 @@ TEST_CASE("[WorkerThreadPool] Retained native completion preserves one-worker co
 	CHECK(fixture.reclaimed == OK);
 	CHECK(fixture.ran.get() == 1);
 }
+
+struct NativeCompletionSaturation {
+	WorkerThreadPool *pool = nullptr;
+	Semaphore entered;
+	Semaphore release;
+	SafeNumeric<uint32_t> compiled;
+	SafeNumeric<uint32_t> joined;
+	SafeFlag start_failed;
+};
+
+struct NativeCompiler {
+	NativeCompletionSaturation *fixture = nullptr;
+	WorkerThreadPool::NativeCompletion *completion = nullptr;
+};
+
+static void native_compiler_task(void *p_userdata) {
+	static_cast<NativeCompletionSaturation *>(p_userdata)->compiled.increment();
+}
+
+static void native_compiler_thread(void *p_userdata) {
+	NativeCompiler *compiler = static_cast<NativeCompiler *>(p_userdata);
+	WorkerThreadPool *pool = compiler->fixture->pool;
+	WorkerThreadPool::TaskID task = pool->add_native_task(native_compiler_task, compiler->fixture, true);
+	pool->wait_for_task_completion(task);
+	pool->complete_native_completion(*compiler->completion);
+}
+
+static void saturated_native_completion_caller(void *p_userdata) {
+	NativeCompletionSaturation *fixture = static_cast<NativeCompletionSaturation *>(p_userdata);
+	fixture->entered.post();
+	fixture->release.wait();
+	WorkerThreadPool::NativeCompletion completion;
+	NativeCompiler compiler;
+	compiler.fixture = fixture;
+	compiler.completion = &completion;
+	Thread worker;
+	worker.start(native_compiler_thread, &compiler);
+	if (!worker.is_started()) {
+		fixture->start_failed.set();
+		return;
+	}
+	fixture->pool->wait_for_native_completion(completion, true);
+	worker.wait_to_finish();
+	fixture->joined.increment();
+}
+
+TEST_CASE("[WorkerThreadPool] Native completion donates a fully saturated high-priority pool") {
+	WorkerThreadPool pool(false);
+	pool.init(2);
+	NativeCompletionSaturation fixture;
+	fixture.pool = &pool;
+	WorkerThreadPool::TaskID first = pool.add_native_task(saturated_native_completion_caller, &fixture, true);
+	WorkerThreadPool::TaskID second = pool.add_native_task(saturated_native_completion_caller, &fixture, true);
+	// Every worker is occupied before either native compiler may queue its work.
+	fixture.entered.wait();
+	fixture.entered.wait();
+	fixture.release.post(2);
+	CHECK(pool.wait_for_task_completion(first) == OK);
+	CHECK(pool.wait_for_task_completion(second) == OK);
+	CHECK_FALSE(fixture.start_failed.is_set());
+	CHECK(fixture.compiled.get() == 2);
+	CHECK(fixture.joined.get() == 2);
+}
+
+static void saturated_native_completion_group_caller(void *p_userdata, uint32_t p_index) {
+	saturated_native_completion_caller(p_userdata);
+}
+
+TEST_CASE("[WorkerThreadPool] Native completion donates saturated high-priority group callers") {
+	WorkerThreadPool pool(false);
+	pool.init(2);
+	NativeCompletionSaturation fixture;
+	fixture.pool = &pool;
+	WorkerThreadPool::GroupID group = pool.add_native_group_task(saturated_native_completion_group_caller, &fixture, 2, 2, true);
+	fixture.entered.wait();
+	fixture.entered.wait();
+	fixture.release.post(2);
+	pool.wait_for_group_task_completion(group);
+	CHECK_FALSE(fixture.start_failed.is_set());
+	CHECK(fixture.compiled.get() == 2);
+	CHECK(fixture.joined.get() == 2);
+}
+
+struct NestedNativeCompletion {
+	WorkerThreadPool *pool = nullptr;
+	WorkerThreadPool::NativeCompletion outer;
+	WorkerThreadPool::NativeCompletion inner;
+	Semaphore outer_entered;
+	Semaphore inner_entered;
+	SafeFlag inner_returned;
+	SafeFlag probe_saw_pending_inner;
+	SafeFlag outer_returned;
+};
+
+static void nested_native_completion_inner(void *p_userdata) {
+	NestedNativeCompletion *fixture = static_cast<NestedNativeCompletion *>(p_userdata);
+	fixture->inner_entered.post();
+	fixture->pool->wait_for_native_completion(fixture->inner, true);
+	fixture->inner_returned.set();
+}
+
+static void nested_native_completion_outer(void *p_userdata) {
+	NestedNativeCompletion *fixture = static_cast<NestedNativeCompletion *>(p_userdata);
+	fixture->outer_entered.post();
+	fixture->pool->wait_for_native_completion(fixture->outer, true);
+	fixture->outer_returned.set();
+}
+
+static void nested_native_completion_probe(void *p_userdata) {
+	NestedNativeCompletion *fixture = static_cast<NestedNativeCompletion *>(p_userdata);
+	fixture->probe_saw_pending_inner.set_to(!fixture->inner_returned.is_set());
+	fixture->pool->complete_native_completion(fixture->inner);
+}
+
+TEST_CASE("[WorkerThreadPool] Native completion keeps exact ownership across forced nested donation") {
+	WorkerThreadPool pool(false);
+	pool.init(1);
+	NestedNativeCompletion fixture;
+	fixture.pool = &pool;
+	WorkerThreadPool::TaskID outer = pool.add_native_task(nested_native_completion_outer, &fixture, true);
+	fixture.outer_entered.wait();
+	WorkerThreadPool::TaskID inner = pool.add_native_task(nested_native_completion_inner, &fixture, true);
+	fixture.inner_entered.wait();
+	// The only worker is now donating inside the inner wait. Completing the
+	// outer record must neither release the inner wait nor lose outer completion.
+	pool.complete_native_completion(fixture.outer);
+	WorkerThreadPool::TaskID probe = pool.add_native_task(nested_native_completion_probe, &fixture, true);
+	CHECK(pool.wait_for_task_completion(outer) == OK);
+	CHECK(pool.wait_for_task_completion(inner) == OK);
+	CHECK(pool.wait_for_task_completion(probe) == OK);
+	CHECK(fixture.probe_saw_pending_inner.is_set());
+	CHECK(fixture.inner_returned.is_set());
+	CHECK(fixture.outer_returned.is_set());
+}
+
+struct NativeCompletionPumpSkip {
+	WorkerThreadPool *pool = nullptr;
+	WorkerThreadPool::NativeCompletion completion;
+	Semaphore caller_entered;
+	Semaphore blocker_entered;
+	Semaphore release_blocker;
+	Semaphore nested_entered;
+	Semaphore release_nested;
+	SafeFlag pump_ran;
+	SafeFlag dependency_skipped_pump;
+
+	void pump() {
+		pump_ran.set();
+	}
+};
+
+static void native_completion_pump_caller(void *p_userdata) {
+	NativeCompletionPumpSkip *fixture = static_cast<NativeCompletionPumpSkip *>(p_userdata);
+	fixture->caller_entered.post();
+	fixture->pool->wait_for_native_completion(fixture->completion, true);
+}
+
+static void native_completion_pump_blocker(void *p_userdata) {
+	NativeCompletionPumpSkip *fixture = static_cast<NativeCompletionPumpSkip *>(p_userdata);
+	fixture->blocker_entered.post();
+	fixture->release_blocker.wait();
+}
+
+static void native_completion_pump_dependency(void *p_userdata) {
+	NativeCompletionPumpSkip *fixture = static_cast<NativeCompletionPumpSkip *>(p_userdata);
+	fixture->dependency_skipped_pump.set_to(!fixture->pump_ran.is_set());
+	fixture->pool->complete_native_completion(fixture->completion);
+}
+
+static void native_completion_pump_nested(void *p_userdata) {
+	NativeCompletionPumpSkip *fixture = static_cast<NativeCompletionPumpSkip *>(p_userdata);
+	fixture->nested_entered.post();
+	fixture->release_nested.wait();
+	WorkerThreadPool::TaskID dependency = fixture->pool->add_native_task(native_completion_pump_dependency, fixture, true);
+	// The enclosing native wait's pump exclusion must survive this default wait.
+	fixture->pool->wait_for_task_completion(dependency);
+}
+
+TEST_CASE("[WorkerThreadPool] Native completion can reach work queued behind an excluded pump task") {
+	WorkerThreadPool pool(false);
+	pool.init(2);
+	NativeCompletionPumpSkip fixture;
+	fixture.pool = &pool;
+	WorkerThreadPool::TaskID blocker = pool.add_native_task(native_completion_pump_blocker, &fixture, true);
+	fixture.blocker_entered.wait();
+	WorkerThreadPool::TaskID caller = pool.add_native_task(native_completion_pump_caller, &fixture, true);
+	fixture.caller_entered.wait();
+	WorkerThreadPool::TaskID pump = pool.add_task(callable_mp(&fixture, &NativeCompletionPumpSkip::pump), true, String(), true);
+	WorkerThreadPool::TaskID dependency = pool.add_native_task(native_completion_pump_dependency, &fixture, true);
+	CHECK(pool.wait_for_task_completion(caller) == OK);
+	fixture.release_blocker.post();
+	CHECK(pool.wait_for_task_completion(blocker) == OK);
+	CHECK(pool.wait_for_task_completion(dependency) == OK);
+	CHECK(pool.wait_for_task_completion(pump) == OK);
+	CHECK(fixture.dependency_skipped_pump.is_set());
+	CHECK(fixture.pump_ran.is_set());
+}
+
+TEST_CASE("[WorkerThreadPool] Native completion inherits pump exclusion through nested ordinary waits") {
+	WorkerThreadPool pool(false);
+	pool.init(2);
+	NativeCompletionPumpSkip fixture;
+	fixture.pool = &pool;
+	WorkerThreadPool::TaskID blocker = pool.add_native_task(native_completion_pump_blocker, &fixture, true);
+	fixture.blocker_entered.wait();
+	WorkerThreadPool::TaskID caller = pool.add_native_task(native_completion_pump_caller, &fixture, true);
+	fixture.caller_entered.wait();
+	WorkerThreadPool::TaskID nested = pool.add_native_task(native_completion_pump_nested, &fixture, true);
+	fixture.nested_entered.wait();
+	WorkerThreadPool::TaskID pump = pool.add_task(callable_mp(&fixture, &NativeCompletionPumpSkip::pump), true, String(), true);
+	fixture.release_nested.post();
+	CHECK(pool.wait_for_task_completion(caller) == OK);
+	fixture.release_blocker.post();
+	CHECK(pool.wait_for_task_completion(blocker) == OK);
+	CHECK(pool.wait_for_task_completion(nested) == OK);
+	CHECK(pool.wait_for_task_completion(pump) == OK);
+	CHECK(fixture.dependency_skipped_pump.is_set());
+	CHECK(fixture.pump_ran.is_set());
+}
+
 #endif
 
 } // namespace TestWorkerThreadPool

@@ -1071,13 +1071,13 @@ public:
 	virtual Variant instance_geometry_get_shader_parameter_default_value(RID p_instance, const StringName &p_parameter) const;
 
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation);
-	virtual Ref<RenderingPipelinePreparation> geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) override;
+	virtual Ref<RenderingPipelinePreparation> geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton);
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 
-	virtual int64_t request_geometry_profile() override;
-	virtual Dictionary get_geometry_profile() override;
-	virtual void geometry_profile_begin_frame() override;
-	virtual void geometry_profile_end_frame() override;
+	virtual int64_t request_geometry_profile();
+	virtual Dictionary get_geometry_profile();
+	virtual void geometry_profile_begin_frame();
+	virtual void geometry_profile_end_frame();
 
 	_FORCE_INLINE_ void _update_instance(Instance *p_instance) const;
 	_FORCE_INLINE_ void _update_instance_aabb(Instance *p_instance) const;

@@ -120,6 +120,7 @@ private:
 		bool pre_exited_languages : 1;
 		bool exited_languages : 1;
 		bool has_pump_task : 1; // Threads can only have one pump task.
+		bool skip_pump_tasks = false; // Worker-owned; inherited by nested collaborative waits.
 		Task *current_task = nullptr;
 		Task *awaited_task = nullptr; // Null if not awaiting the condition variable, or special value (YIELDING).
 		ConditionVariable cond_var;
@@ -218,7 +219,7 @@ private:
 		}
 	};
 
-	void _wait_collaboratively(ThreadData *p_caller_pool_thread, Task *p_task);
+	void _wait_collaboratively(ThreadData *p_caller_pool_thread, Task *p_task, bool p_skip_pump_tasks = false);
 	Error _wait_for_task_completion(TaskID p_task_id, bool p_reclaim);
 
 	void _switch_runlevel(Runlevel p_runlevel);
@@ -253,6 +254,22 @@ public:
 	// Native owners can retain a completion record for repeated/concurrent waits.
 	// They must reclaim it with wait_for_task_completion after all users join.
 	Error wait_for_task_completion_without_reclaim(TaskID p_task_id);
+
+	// One-shot native completion, owned by its caller rather than the task registry.
+	// Never queued or assigned a TaskID. Keep it alive until its producer and all
+	// waiters have finished, and use the same pool for completion and waiting.
+	class NativeCompletion {
+		friend class WorkerThreadPool;
+		Task task;
+
+	public:
+		NativeCompletion() = default;
+		NativeCompletion(const NativeCompletion &) = delete;
+		NativeCompletion &operator=(const NativeCompletion &) = delete;
+	};
+
+	void complete_native_completion(NativeCompletion &p_completion);
+	void wait_for_native_completion(NativeCompletion &p_completion, bool p_skip_pump_tasks = false);
 
 	void yield();
 	void notify_yield_over(TaskID p_task_id);

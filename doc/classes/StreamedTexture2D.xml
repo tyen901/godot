@@ -26,11 +26,15 @@
 		</method>
 		<method name="get_current_mip" qualifiers="const">
 			<return type="int" />
-			<description>Returns the successfully submitted resident source mip, or [code]-1[/code] after its provider owner has been drained. The logical resource dimensions remain the original size.</description>
+			<description>
+				Returns the successfully submitted resident source mip, or [code]-1[/code] after its provider owner has been drained. The logical resource dimensions remain the original size.
+			</description>
 		</method>
 		<method name="get_streaming_error" qualifiers="const">
 			<return type="int" enum="Error" />
-			<description>Returns the latest provider validation/load error, [constant OK] while healthy, or [constant ERR_UNCONFIGURED] after owner drain. A failed request does not advance residency and suspends further requests until [method retry_streaming].</description>
+			<description>
+				Returns the latest provider validation/load error, [constant OK] while healthy, or [constant ERR_UNCONFIGURED] after owner drain. A failed request does not advance residency and suspends further requests until [method retry_streaming].
+			</description>
 		</method>
 		<method name="load">
 			<return type="int" enum="Error" />
@@ -41,7 +45,9 @@
 		</method>
 		<method name="retry_streaming">
 			<return type="void" />
-			<description>Clears a provider failure so native feedback can request a mip again. Does not change residency or restart a drained owner.</description>
+			<description>
+				Clears a provider failure so native feedback can request a mip again. Does not change residency or restart a drained owner.
+			</description>
 		</method>
 	</methods>
 	<members>

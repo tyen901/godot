@@ -474,29 +474,52 @@ Error RenderingServerDefault::_geometry_prepare_pipeline_configurations(const Ve
 		}
 	}
 
+	struct CompileData {
+		const Vector<Ref<RenderingPipelinePreparation>> *preparations = nullptr;
+		WorkerThreadPool *pool = nullptr;
+		WorkerThreadPool::NativeCompletion *completion = nullptr;
+	};
+	CompileData compile_data;
+	compile_data.preparations = &preparations;
 	auto compile = [](void *p_userdata) {
 		Thread::set_name("PipelinePreparation");
-		const Vector<Ref<RenderingPipelinePreparation>> &jobs = *static_cast<Vector<Ref<RenderingPipelinePreparation>> *>(p_userdata);
+		CompileData &data = *static_cast<CompileData *>(p_userdata);
+		const Vector<Ref<RenderingPipelinePreparation>> &jobs = *data.preparations;
 		for (const Ref<RenderingPipelinePreparation> &job : jobs) {
 			job->error = job->compile();
 			if (job->error != OK) {
 				break;
 			}
 		}
+		if (data.completion) {
+			data.pool->complete_native_completion(*data.completion);
+		}
 	};
-	if (Thread::is_main_thread() || WorkerThreadPool::get_singleton()->get_caller_task_id() != WorkerThreadPool::INVALID_TASK_ID) {
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	const bool pool_caller = pool->get_thread_index() != -1;
+	if (Thread::is_main_thread() || pool_caller) {
 #ifdef THREADS_ENABLED
 		// One renderer dispatch snapshots the load unit; all native compiler work
 		// completes off the renderer without queuing commands back to its caller.
+		WorkerThreadPool::NativeCompletion completion;
+		if (pool_caller) {
+			compile_data.pool = pool;
+			compile_data.completion = &completion;
+		}
 		Thread worker;
-		worker.start(compile, &preparations);
+		worker.start(compile, &compile_data);
 		ERR_FAIL_COND_V(!worker.is_started(), ERR_CANT_CREATE);
+		if (pool_caller) {
+			// Even fully occupied high-priority callers must leave capacity for the
+			// compiler's pool tasks, without reentering renderer pump callbacks.
+			pool->wait_for_native_completion(completion, true);
+		}
 		worker.wait_to_finish();
 #else
 		return ERR_UNAVAILABLE;
 #endif
 	} else {
-		compile(&preparations);
+		compile(&compile_data);
 	}
 	for (const Ref<RenderingPipelinePreparation> &preparation : preparations) {
 		if (preparation->error != OK) {

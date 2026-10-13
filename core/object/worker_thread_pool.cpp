@@ -475,6 +475,43 @@ Error WorkerThreadPool::_wait_for_task_completion(TaskID p_task_id, bool p_recla
 	return OK;
 }
 
+void WorkerThreadPool::complete_native_completion(NativeCompletion &p_completion) {
+	MutexLock lock(task_mutex);
+	Task *task = &p_completion.task;
+	ERR_FAIL_COND(task->completed);
+	task->completed = true;
+	if (task->waiting_user) {
+		task->done_semaphore.post(task->waiting_user);
+	}
+	for (ThreadData &thread : threads) {
+		if (thread.awaited_task == task) {
+			thread.cond_var.notify_one();
+			thread.signaled = true;
+		}
+	}
+}
+
+void WorkerThreadPool::wait_for_native_completion(NativeCompletion &p_completion, bool p_skip_pump_tasks) {
+	Task *task = &p_completion.task;
+	task_mutex.lock();
+	if (task->completed) {
+		task_mutex.unlock();
+		return;
+	}
+	ThreadData *caller_pool_thread = thread_ids.has(Thread::get_caller_id()) ? &threads[thread_ids[Thread::get_caller_id()]] : nullptr;
+	if (caller_pool_thread) {
+		task_mutex.unlock();
+		// Unlike yield(), this waits for this exact record even across nested donation.
+		_wait_collaboratively(caller_pool_thread, task, p_skip_pump_tasks);
+	} else {
+		task->waiting_user++;
+		task_mutex.unlock();
+		task->done_semaphore.wait();
+		MutexLock lock(task_mutex);
+		task->waiting_user--;
+	}
+}
+
 void WorkerThreadPool::_lock_unlockable_mutexes() {
 #ifdef THREADS_ENABLED
 	for (uint32_t i = 0; i < MAX_UNLOCKABLE_LOCKS; i++) {
@@ -495,7 +532,10 @@ void WorkerThreadPool::_unlock_unlockable_mutexes() {
 #endif
 }
 
-void WorkerThreadPool::_wait_collaboratively(ThreadData *p_caller_pool_thread, Task *p_task) {
+void WorkerThreadPool::_wait_collaboratively(ThreadData *p_caller_pool_thread, Task *p_task, bool p_skip_pump_tasks) {
+	// Keep pump exclusion on this stack when a donated task waits recursively.
+	const bool skip_pump_tasks_backup = p_caller_pool_thread->skip_pump_tasks;
+	p_caller_pool_thread->skip_pump_tasks |= p_skip_pump_tasks;
 	// Keep processing tasks until the condition to stop waiting is met.
 
 	while (true) {
@@ -546,13 +586,21 @@ void WorkerThreadPool::_wait_collaboratively(ThreadData *p_caller_pool_thread, T
 				}
 			}
 
-			if (p_caller_pool_thread->pool->task_queue.first()) {
-				task_to_process = task_queue.first()->self();
+			SelfList<Task> *queued_task = task_queue.first();
+			if (p_caller_pool_thread->skip_pump_tasks) {
+				// A renderer snapshot owner must not reenter a long-lived pump task.
+				// Still reach compiler tasks queued behind one when the pool is full.
+				while (queued_task && queued_task->self()->is_pump_task) {
+					queued_task = queued_task->next();
+				}
+			}
+			if (queued_task) {
+				task_to_process = queued_task->self();
 				if ((p_task == ThreadData::YIELDING || p_caller_pool_thread->has_pump_task == true) && task_to_process->is_pump_task) {
 					task_to_process = nullptr;
 					_notify_threads(p_caller_pool_thread, 1, 0);
 				} else {
-					task_queue.remove(task_queue.first());
+					task_queue.remove(queued_task);
 				}
 			}
 
@@ -578,6 +626,7 @@ void WorkerThreadPool::_wait_collaboratively(ThreadData *p_caller_pool_thread, T
 			_process_task(task_to_process);
 		}
 	}
+	p_caller_pool_thread->skip_pump_tasks = skip_pump_tasks_backup;
 }
 
 void WorkerThreadPool::_switch_runlevel(Runlevel p_runlevel) {

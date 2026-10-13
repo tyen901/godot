@@ -875,7 +875,7 @@ static void _fill_surface_geometry_data(
 	}
 
 	RT_GeometryData &geom = r_surf_data->geometry;
-	memset(&geom, 0, sizeof(geom));
+	geom = {};
 
 	RID vertex_buffer = mesh_storage->mesh_surface_get_vertex_buffer(p_mesh_surface);
 	RID attribute_buffer = mesh_storage->mesh_surface_get_attribute_buffer(p_mesh_surface);
@@ -3103,7 +3103,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		ld.max_range_squared = 0.0f;
 		ld.specular_amount = ls->light_get_param(base, RSE::LIGHT_PARAM_SPECULAR);
 		ld.indirect_energy = ls->light_get_param(base, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
-		ld.flags = ls->light_has_shadow(base) ? RT_LIGHT_SHADOW_ENABLED : 0u;
+		ld.flags = ls->light_has_shadow(base) ? uint32_t(RT_LIGHT_SHADOW_ENABLED) : 0u;
 		ld.inv_spot_attenuation = 0.0f;
 		ld.cos_spot_angle = 0.0f;
 		ld.spot_direction[0] = 0.0f;
@@ -3158,7 +3158,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		}
 		ld.specular_amount = ls->light_get_param(base, RSE::LIGHT_PARAM_SPECULAR) * 2.0f; // Matches rasterizer convention (light_storage.cpp), normalizes 0.5 default to 1.0.
 		ld.indirect_energy = ls->light_get_param(base, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
-		ld.flags = ls->light_has_shadow(base) ? RT_LIGHT_SHADOW_ENABLED : 0u;
+		ld.flags = ls->light_has_shadow(base) ? uint32_t(RT_LIGHT_SHADOW_ENABLED) : 0u;
 
 		if (type == RSE::LIGHT_SPOT) {
 			ld.inv_spot_attenuation = 1.0f / MAX(0.001f, ls->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ATTENUATION));

@@ -35,7 +35,6 @@
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "servers/rendering/rendering_device.h"
-#include "servers/rendering/rendering_pipeline_preparation.h"
 #include "servers/rendering/rendering_server_types.h"
 
 class StringBuilder;
@@ -111,7 +110,6 @@ private:
 
 	RID_Owner<Version, true> version_owner;
 	Mutex versions_mutex;
-	PipelinePreparationTracker preparation_tracker;
 	HashMap<RID, Mutex *> version_mutexes;
 
 	struct StageTemplate {
@@ -245,9 +243,6 @@ public:
 
 	// Enable/disable groups for things that might be enabled at run time.
 	void enable_group(int p_group);
-	void begin_pipeline_preparation() { preparation_tracker.begin(); }
-	void end_pipeline_preparation() { preparation_tracker.end(); }
-	void wait_for_pipeline_preparations() { preparation_tracker.wait(); }
 	bool is_group_enabled(int p_group) const;
 	int64_t get_group_count() const;
 	const LocalVector<int> &get_group_to_variants(int p_group) const;

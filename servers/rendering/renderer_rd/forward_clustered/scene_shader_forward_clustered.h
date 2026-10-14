@@ -33,7 +33,6 @@
 #include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
-#include "servers/rendering/rendering_pipeline_preparation.h"
 #include "servers/rendering/rendering_server_types.h"
 
 namespace RendererSceneRenderImplementation {
@@ -192,8 +191,8 @@ public:
 		};
 
 		struct PipelineKey {
-			RD::VertexFormatID vertex_format_id = 0;
-			RD::FramebufferFormatID framebuffer_format_id = 0;
+			RD::VertexFormatID vertex_format_id;
+			RD::FramebufferFormatID framebuffer_format_id;
 			RD::PolygonCullMode cull_mode = RD::POLYGON_CULL_MAX;
 			RSE::PrimitiveType primitive_type = RSE::PRIMITIVE_MAX;
 			PipelineVersion version = PipelineVersion::PIPELINE_VERSION_MAX;
@@ -222,7 +221,6 @@ public:
 		PipelineHashMapRD<PipelineKey, ShaderData, void (ShaderData::*)(PipelineKey)> pipeline_hash_map;
 
 		RID version;
-		PipelinePreparationTracker preparation_tracker;
 
 		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};

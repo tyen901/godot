@@ -369,129 +369,6 @@ void RenderForwardMobile::setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_r
 	p_render_buffers->set_custom_data(RB_SCOPE_MOBILE, data);
 }
 
-Error RenderForwardMobile::PipelinePreparation::compile() {
-	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
-	Error result = OK;
-	for (PipelineRequest &request : requests) {
-		if (!request.shader->is_valid()) {
-			result = ERR_INVALID_DATA;
-			break;
-		}
-		// Draw asks for the specialization mask before its nonblocking lookup.
-		// Resolve both masks on this worker, without forcing scene specialization.
-		request.shader->get_vertex_input_mask(request.key.version, false);
-		uint64_t input_mask = request.shader->get_vertex_input_mask(request.key.version, true);
-		request.key.vertex_format_id = mesh_storage->mesh_surface_generate_vertex_format(request.surface_format, input_mask, request.instanced, false, request.emulate_point_size);
-		request.shader->pipeline_hash_map.compile_pipeline(request.key, request.key.hash(), RSE::PIPELINE_SOURCE_MESH, true);
-		request.submitted = true;
-	}
-	// Join everything submitted even when a later shader failed. Shader pins
-	// must never be released while one of these native pipeline jobs still runs.
-	for (const PipelineRequest &request : requests) {
-		if (!request.submitted) {
-			continue;
-		}
-		Error wait_error = request.shader->pipeline_hash_map.wait_for_pipeline(request.key.hash());
-		if (result == OK && wait_error != OK) {
-			result = wait_error;
-		}
-	}
-	return result;
-}
-
-RenderForwardMobile::PipelinePreparation::~PipelinePreparation() {
-	for (SceneShaderForwardMobile::ShaderData *shader : shaders) {
-		shader->preparation_tracker.end();
-	}
-	if (native_shader != nullptr) {
-		native_shader->end_pipeline_preparation();
-	}
-}
-
-Ref<RenderingPipelinePreparation> RenderForwardMobile::geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) {
-	ERR_NOT_ON_RENDER_THREAD_V(Ref<RenderingPipelinePreparation>());
-	Ref<PipelinePreparation> preparation;
-	preparation.instantiate();
-	if (disable_ubershaders) {
-		preparation->error = ERR_UNAVAILABLE;
-		return preparation;
-	}
-	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
-	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
-	RSE::InstanceType base_type = RSG::utilities->get_base_type(p_base);
-	if (base_type != RSE::INSTANCE_MESH && base_type != RSE::INSTANCE_MULTIMESH) {
-		preparation->error = ERR_INVALID_PARAMETER;
-		return preparation;
-	}
-	RID mesh = base_type == RSE::INSTANCE_MULTIMESH ? mesh_storage->multimesh_get_mesh(p_base) : p_base;
-	if (mesh.is_null()) {
-		preparation->error = ERR_INVALID_DATA;
-		return preparation;
-	}
-	preparation->native_shader = &scene_shader.shader;
-	preparation->native_shader->begin_pipeline_preparation();
-	RID shadow_mesh = mesh_storage->mesh_get_shadow_mesh(mesh);
-	uint32_t surface_count = 0;
-	const RID *materials = mesh_storage->mesh_get_surface_count_and_materials(mesh, surface_count);
-	if (surface_count == 0) {
-		preparation->error = ERR_INVALID_DATA;
-		return preparation;
-	}
-	GlobalPipelineData global = global_pipeline_data_required;
-	if (p_shadow_casting == RSE::SHADOW_CASTING_SETTING_OFF) {
-		global.use_shadow_cubemaps = false;
-		global.use_shadow_dual_paraboloid = false;
-		global.use_16_bit_shadows = false;
-		global.use_32_bit_shadows = false;
-	}
-	for (uint32_t i = 0; i < surface_count; i++) {
-		RID material_rid = p_material_override.is_valid() ? p_material_override : materials[i];
-		// Null surfaces use the same native default material as actual drawing.
-		if (material_rid.is_null()) {
-			material_rid = scene_shader.default_material;
-		}
-		HashSet<RID> material_chain;
-		while (material_rid.is_valid()) {
-			if (material_chain.has(material_rid)) {
-				preparation->error = ERR_INVALID_DATA;
-				return preparation;
-			}
-			SceneShaderForwardMobile::MaterialData *material = static_cast<SceneShaderForwardMobile::MaterialData *>(material_storage->material_get_data(material_rid, RendererRD::MaterialStorage::SHADER_TYPE_3D));
-			material_chain.insert(material_rid);
-			// Do not wait on ShaderData::is_valid() while snapshotting renderer state.
-			if (material == nullptr || material->shader_data == nullptr || material->shader_data->version.is_null()) {
-				preparation->error = ERR_INVALID_DATA;
-				return preparation;
-			}
-			SurfacePipelineData surface;
-			surface.mesh_surface = mesh_storage->mesh_get_surface(mesh, i);
-			surface.mesh_surface_shadow = surface.mesh_surface;
-			surface.shader = material->shader_data;
-			surface.shader_shadow = surface.shader;
-			if (surface.shader->uses_shared_shadow_material()) {
-				surface.shader_shadow = scene_shader.default_material_shader_ptr;
-				if (shadow_mesh.is_valid()) {
-					surface.mesh_surface_shadow = mesh_storage->mesh_get_surface(shadow_mesh, i);
-				}
-			}
-			if (surface.mesh_surface == nullptr || surface.mesh_surface_shadow == nullptr || surface.shader_shadow == nullptr) {
-				preparation->error = ERR_INVALID_DATA;
-				return preparation;
-			}
-			// MultiMesh transforms are storage-buffer inputs, not deformed vertex arrays.
-			surface.instanced = base_type == RSE::INSTANCE_MESH && mesh_storage->mesh_needs_instance(mesh, p_use_skeleton);
-			surface.uses_opaque = !surface.shader->uses_alpha_pass();
-			surface.uses_transparent = surface.shader->uses_alpha_pass();
-			surface.uses_depth = surface.uses_opaque || (surface.uses_transparent && surface.shader->uses_depth_in_alpha_pass());
-			surface.uses_color = p_shadow_casting != RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY;
-			surface.can_use_lightmap = mesh_storage->mesh_surface_get_format(surface.mesh_surface) & RSE::ARRAY_FORMAT_TEX_UV2;
-			_mesh_compile_pipelines_for_surface(surface, global, RSE::PIPELINE_SOURCE_MESH, nullptr, preparation.ptr());
-			material_rid = material->next_pass;
-		}
-	}
-	return preparation;
-}
-
 void RenderForwardMobile::mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) {
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
@@ -3502,29 +3379,12 @@ static RD::FramebufferFormatID _get_shadow_atlas_framebuffer_format_for_pipeline
 	return RD::get_singleton()->framebuffer_format_create(Vector<RD::AttachmentFormat>(attachments));
 }
 
-void RenderForwardMobile::_mesh_compile_pipeline_for_surface(SceneShaderForwardMobile::ShaderData *p_shader, void *p_mesh_surface, bool p_instanced_surface, RSE::PipelineSource p_source, SceneShaderForwardMobile::ShaderData::PipelineKey &r_pipeline_key, Vector<ShaderPipelinePair> *r_pipeline_pairs, PipelinePreparation *p_preparation) {
+void RenderForwardMobile::_mesh_compile_pipeline_for_surface(SceneShaderForwardMobile::ShaderData *p_shader, void *p_mesh_surface, bool p_instanced_surface, RSE::PipelineSource p_source, SceneShaderForwardMobile::ShaderData::PipelineKey &r_pipeline_key, Vector<ShaderPipelinePair> *r_pipeline_pairs) {
 	if (disable_ubershaders) {
 		return;
 	}
 
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
-	if (p_preparation != nullptr) {
-		if (!p_preparation->shaders.has(p_shader)) {
-			p_preparation->shaders.insert(p_shader);
-			p_shader->preparation_tracker.begin();
-		}
-		PipelineRequest request;
-		request.shader = p_shader;
-		request.key = r_pipeline_key;
-		request.key.ubershader = true;
-		request.key.vertex_format_id = 0;
-		request.surface_format = mesh_storage->mesh_surface_get_format(p_mesh_surface);
-		request.instanced = p_instanced_surface;
-		request.emulate_point_size = p_shader->uses_point_size && scene_shader.emulate_point_size;
-		p_preparation->requests.push_back(request);
-		return;
-	}
-
 	uint64_t input_mask = p_shader->get_vertex_input_mask(r_pipeline_key.version, true);
 	bool emulate_point_size = p_shader->uses_point_size && scene_shader.emulate_point_size;
 	r_pipeline_key.vertex_format_id = mesh_storage->mesh_surface_get_vertex_format(p_mesh_surface, input_mask, p_instanced_surface, false, emulate_point_size);
@@ -3536,7 +3396,7 @@ void RenderForwardMobile::_mesh_compile_pipeline_for_surface(SceneShaderForwardM
 	}
 }
 
-void RenderForwardMobile::_mesh_compile_pipelines_for_surface(const SurfacePipelineData &p_surface, const GlobalPipelineData &p_global, RSE::PipelineSource p_source, Vector<ShaderPipelinePair> *r_pipeline_pairs, PipelinePreparation *p_preparation) {
+void RenderForwardMobile::_mesh_compile_pipelines_for_surface(const SurfacePipelineData &p_surface, const GlobalPipelineData &p_global, RSE::PipelineSource p_source, Vector<ShaderPipelinePair> *r_pipeline_pairs) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	bool octmap_use_storage = !copy_effects->get_raster_effects().has_flag(RendererRD::CopyEffects::RASTER_EFFECT_OCTMAP);
 
@@ -3556,42 +3416,40 @@ void RenderForwardMobile::_mesh_compile_pipelines_for_surface(const SurfacePipel
 	const uint32_t hdr_start = p_global.use_ldr_render_target ? 0 : 1;
 	const uint32_t hdr_target_iterations = p_global.use_hdr_render_target ? 2 : 1;
 
-	if (p_surface.uses_color) {
-		for (uint32_t use_vrs = 0; use_vrs < vrs_iterations; use_vrs++) {
-			for (uint32_t use_post_pass = post_pass_start; use_post_pass < post_pass_iterations; use_post_pass++) {
-				const uint32_t hdr_iterations = use_post_pass ? hdr_target_iterations : (hdr_start + 1);
-				for (uint32_t use_hdr = hdr_start; use_hdr < hdr_iterations; use_hdr++) {
-					const RD::DataFormat buffers_color_format = use_hdr ? RD::DATA_FORMAT_R16G16B16A16_SFLOAT : _render_buffers_get_preferred_color_format();
-					pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS;
-					pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), RD::TextureSamples(p_global.target_samples), use_vrs, use_post_pass, use_hdr, 1);
-					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
+	for (uint32_t use_vrs = 0; use_vrs < vrs_iterations; use_vrs++) {
+		for (uint32_t use_post_pass = post_pass_start; use_post_pass < post_pass_iterations; use_post_pass++) {
+			const uint32_t hdr_iterations = use_post_pass ? hdr_target_iterations : (hdr_start + 1);
+			for (uint32_t use_hdr = hdr_start; use_hdr < hdr_iterations; use_hdr++) {
+				const RD::DataFormat buffers_color_format = use_hdr ? RD::DATA_FORMAT_R16G16B16A16_SFLOAT : _render_buffers_get_preferred_color_format();
+				pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS;
+				pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), RD::TextureSamples(p_global.target_samples), use_vrs, use_post_pass, use_hdr, 1);
+				_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+
+				if (p_global.use_lightmaps && p_surface.can_use_lightmap) {
+					pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_LIGHTMAP_COLOR_PASS;
+					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+				}
+
+				if (multiview_enabled) {
+					// View count is assumed to be 2 as the configuration is dependent on the viewport. It's likely a safe assumption for stereo rendering.
+					const uint32_t view_count = 2;
+					pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS_MULTIVIEW;
+					pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), RD::TextureSamples(p_global.target_samples), use_vrs, use_post_pass, use_hdr, view_count);
+					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 
 					if (p_global.use_lightmaps && p_surface.can_use_lightmap) {
-						pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_LIGHTMAP_COLOR_PASS;
-						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
-					}
-
-					if (multiview_enabled) {
-						// View count is assumed to be 2 as the configuration is dependent on the viewport. It's likely a safe assumption for stereo rendering.
-						const uint32_t view_count = 2;
-						pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS_MULTIVIEW;
-						pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), RD::TextureSamples(p_global.target_samples), use_vrs, use_post_pass, use_hdr, view_count);
-						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
-
-						if (p_global.use_lightmaps && p_surface.can_use_lightmap) {
-							pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_LIGHTMAP_COLOR_PASS_MULTIVIEW;
-							_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
-						}
+						pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_LIGHTMAP_COLOR_PASS_MULTIVIEW;
+						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 					}
 				}
 			}
 		}
+	}
 
-		if (p_global.use_reflection_probes) {
-			pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS;
-			pipeline_key.framebuffer_format_id = _get_reflection_probe_color_framebuffer_format_for_pipeline(octmap_use_storage);
-			_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
-		}
+	if (p_global.use_reflection_probes) {
+		pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS;
+		pipeline_key.framebuffer_format_id = _get_reflection_probe_color_framebuffer_format_for_pipeline(octmap_use_storage);
+		_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 	}
 
 	if (!p_surface.uses_depth) {
@@ -3601,7 +3459,7 @@ void RenderForwardMobile::_mesh_compile_pipelines_for_surface(const SurfacePipel
 	if (p_global.use_shadow_cubemaps) {
 		pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_SHADOW_PASS;
 		pipeline_key.framebuffer_format_id = _get_shadow_cubemap_framebuffer_format_for_pipeline();
-		_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
+		_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 	}
 
 	const uint32_t use_16_bits_start = p_global.use_32_bit_shadows ? 0 : 1;
@@ -3609,16 +3467,16 @@ void RenderForwardMobile::_mesh_compile_pipelines_for_surface(const SurfacePipel
 	for (uint32_t use_16_bits = use_16_bits_start; use_16_bits < use_16_bits_iterations; use_16_bits++) {
 		pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_SHADOW_PASS;
 		pipeline_key.framebuffer_format_id = _get_shadow_atlas_framebuffer_format_for_pipeline(use_16_bits);
-		_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
+		_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 
 		if (p_global.use_shadow_dual_paraboloid) {
 			pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_SHADOW_PASS_DP;
-			_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
+			_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 		}
 
 		if (multiview_enabled) {
 			pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_SHADOW_PASS_MULTIVIEW;
-			_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs, p_preparation);
+			_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 		}
 	}
 }

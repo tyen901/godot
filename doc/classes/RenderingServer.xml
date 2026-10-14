@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  RenderingServer.xml                                                   */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="RenderingServer" inherits="Object" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
@@ -1639,25 +1669,6 @@
 			<param index="0" name="rid" type="RID" />
 			<description>
 				Tries to free an object in the RenderingServer. To avoid memory leaks, this should be called after using an object as memory management does not occur automatically when using RenderingServer directly.
-			</description>
-		</method>
-		<method name="geometry_prepare_pipelines">
-			<return type="int" enum="Error" />
-			<param index="0" name="base" type="Resource" />
-			<param index="1" name="material_override" type="Resource" default="null" />
-			<param index="2" name="shadow_casting" type="int" enum="RenderingServer.ShadowCastingSetting" default="1" />
-			<param index="3" name="use_skeleton" type="bool" default="false" />
-			<description>
-				Prepares the native rendering pipelines for an immutable [Mesh] or [MultiMesh] resource and its optional [Material] override, including material next passes. Unassigned surfaces use the native default material. For an ordinary mesh, [param use_skeleton] must match whether its instance uses a skeleton. MultiMesh transforms do not use the deformed mesh vertex layout.
-				Renderer requirements and mesh formats are snapshotted on the rendering thread. Shader compilation, vertex input mask resolution, and required ubershader pipeline completion are joined on a resource-loading thread. Resource references and native shader state are retained until completion. Synchronous main-thread calls run compilation on a native worker and wait for it. WorkerThreadPool callers cooperatively execute queued non-pump tasks until that native worker completes all shader and pipeline waits, then join it. Completion is specific to each preparation call, including nested cooperative waits. Calls from a separate rendering thread return [constant @GlobalScope.ERR_BUSY].
-				Returns [constant @GlobalScope.OK] only after the required native pipelines have completed successfully. Invalid resources, shaders, and pipeline failures return an error. Renderers without this preparation path, including the headless renderer and Compatibility, return [constant @GlobalScope.ERR_UNAVAILABLE]. This is not GPU execution or scene visibility evidence. Later changes to renderer requirements or resource configuration can require new pipelines, and scene-dependent specialized pipelines continue to use the renderer's normal asynchronous path.
-			</description>
-		</method>
-		<method name="geometry_prepare_pipelines_batch">
-			<return type="int" enum="Error" />
-			<param index="0" name="configurations" type="Dictionary[]" />
-			<description>
-				Prepares a nonempty load unit in one rendering-thread snapshot dispatch, with the same completion and lifetime contract as [method geometry_prepare_pipelines]. Each dictionary requires a [code]base[/code] [Mesh] or [MultiMesh] resource and can specify a [code]material_override[/code] [Material], [code]shadow_casting[/code] [enum ShadowCastingSetting] (default [constant SHADOW_CASTING_SETTING_ON]), and [code]use_skeleton[/code] boolean (default [code]false[/code]). Strong resource references are retained until native preparation completes. Returns an error if any configuration cannot be prepared; partially prepared configurations must not be interpreted as a successful load unit.
 			</description>
 		</method>
 		<method name="get_current_rendering_driver_name" qualifiers="const">

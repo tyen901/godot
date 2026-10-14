@@ -33,7 +33,6 @@
 #include "core/variant/dictionary.h"
 #include "core/variant/typed_array.h"
 #include "core/variant/variant.h"
-#include "servers/rendering/rendering_pipeline_preparation.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -128,7 +127,6 @@ public:
 	/* PIPELINES */
 
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) = 0;
-	virtual Ref<RenderingPipelinePreparation> geometry_prepare_pipeline_snapshot(RID p_base, RID p_material_override, RSE::ShadowCastingSetting p_shadow_casting, bool p_use_skeleton) { return Ref<RenderingPipelinePreparation>(); }
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) = 0;
 
 	virtual int64_t request_geometry_profile() { return 0; }

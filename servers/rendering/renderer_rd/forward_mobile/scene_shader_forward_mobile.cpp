@@ -41,7 +41,6 @@ using namespace RendererSceneRenderImplementation;
 /* ShaderData */
 
 void SceneShaderForwardMobile::ShaderData::set_code(const String &p_code) {
-	preparation_tracker.wait();
 	//compile
 
 	code = p_code;
@@ -521,7 +520,6 @@ SceneShaderForwardMobile::ShaderData::ShaderData() :
 }
 
 SceneShaderForwardMobile::ShaderData::~ShaderData() {
-	preparation_tracker.wait();
 	pipeline_hash_map.clear_pipelines();
 
 	if (version.is_valid()) {
@@ -959,7 +957,6 @@ void fragment() {
 }
 
 void SceneShaderForwardMobile::set_default_specialization(const ShaderSpecialization &p_specialization) {
-	shader.wait_for_pipeline_preparations();
 	default_specialization = p_specialization;
 
 	for (ShaderData &shader_data : shader_list) {

@@ -199,9 +199,6 @@ public:
 	virtual int64_t request_geometry_profile() = 0;
 	virtual Dictionary get_geometry_profile() = 0;
 
-	virtual Error geometry_prepare_pipelines_batch(const TypedArray<Dictionary> &p_configurations) = 0;
-	virtual Error geometry_prepare_pipelines(const Ref<Resource> &p_base, const Ref<Resource> &p_material_override = Ref<Resource>(), RSE::ShadowCastingSetting p_shadow_casting = RSE::SHADOW_CASTING_SETTING_ON, bool p_use_skeleton = false) = 0;
-
 	virtual RID mesh_create_from_surfaces(const Vector<RenderingServerTypes::SurfaceData> &p_surfaces, int p_blend_shape_count = 0) = 0;
 	virtual RID mesh_create() = 0;
 

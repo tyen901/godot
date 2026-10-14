@@ -647,11 +647,6 @@ public:
 		return s->particles_render_index;
 	}
 
-	_FORCE_INLINE_ RD::VertexFormatID mesh_surface_generate_vertex_format(uint64_t p_surface_format, uint64_t p_input_mask, bool p_instanced_surface, bool p_input_motion_vectors, bool p_point_size_emulated) {
-		uint32_t position_stride = 0;
-		return _mesh_surface_generate_vertex_format(p_surface_format, p_input_mask, p_instanced_surface, p_input_motion_vectors, p_point_size_emulated, position_stride);
-	}
-
 	_FORCE_INLINE_ RD::VertexFormatID mesh_surface_get_vertex_format(void *p_surface, uint64_t p_input_mask, bool p_instanced_surface, bool p_input_motion_vectors, bool p_point_size_emulated) {
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
 		uint32_t position_stride = 0;

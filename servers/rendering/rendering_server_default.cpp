@@ -438,13 +438,32 @@ void RenderingServerDefault::set_physics_interpolation_enabled(bool p_enabled) {
 	RSG::scene->set_physics_interpolation_enabled(p_enabled);
 }
 
+class InvalidGeometryPipelinePreparation : public RenderingPipelinePreparation {
+public:
+	virtual Error compile() override { return error; }
+};
+
 Vector<Ref<RenderingPipelinePreparation>> RenderingServerDefault::_geometry_prepare_pipeline_snapshots(const Vector<GeometryPipelineConfiguration> &p_configurations) {
 	Vector<Ref<RenderingPipelinePreparation>> preparations;
 	if (pipeline_preparation_stopping) {
 		return preparations;
 	}
 	for (const GeometryPipelineConfiguration &configuration : p_configurations) {
-		Ref<RenderingPipelinePreparation> preparation = RSG::scene->geometry_prepare_pipeline_snapshot(configuration.base_rid, configuration.material_rid, configuration.shadow_casting, configuration.use_skeleton);
+		// Resolve lazy native resources at this serialized renderer boundary. In
+		// particular, concurrent BaseMaterial3D::get_rid() calls can otherwise
+		// observe a shared material's key before its shader has been installed.
+		const RID base_rid = configuration.base->get_rid();
+		const RID material_rid = configuration.material_override.is_valid() ? configuration.material_override->get_rid() : RID();
+		Ref<RenderingPipelinePreparation> preparation;
+		if (base_rid.is_null() || (configuration.material_override.is_valid() && material_rid.is_null())) {
+			ERR_PRINT("Pipeline preparation requires valid geometry and material RIDs.");
+			Ref<InvalidGeometryPipelinePreparation> invalid;
+			invalid.instantiate();
+			invalid->error = ERR_INVALID_PARAMETER;
+			preparation = invalid;
+		} else {
+			preparation = RSG::scene->geometry_prepare_pipeline_snapshot(base_rid, material_rid, configuration.shadow_casting, configuration.use_skeleton);
+		}
 		if (preparation.is_valid()) {
 			preparation->retain_resources(configuration.base, configuration.material_override);
 		}
@@ -546,9 +565,6 @@ Error RenderingServerDefault::geometry_prepare_pipelines_batch(const TypedArray<
 		ERR_FAIL_COND_V(shadow_casting_value < RSE::SHADOW_CASTING_SETTING_OFF || shadow_casting_value > RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY, ERR_INVALID_PARAMETER);
 		configuration.shadow_casting = RSE::ShadowCastingSetting(shadow_casting_value);
 		configuration.use_skeleton = use_skeleton;
-		configuration.base_rid = configuration.base->get_rid();
-		configuration.material_rid = configuration.material_override.is_valid() ? configuration.material_override->get_rid() : RID();
-		ERR_FAIL_COND_V(configuration.base_rid.is_null() || (configuration.material_override.is_valid() && configuration.material_rid.is_null()), ERR_INVALID_PARAMETER);
 		configurations.push_back(configuration);
 	}
 	return _geometry_prepare_pipeline_configurations(configurations);
@@ -563,14 +579,8 @@ Error RenderingServerDefault::geometry_prepare_pipelines(const Ref<Resource> &p_
 	GeometryPipelineConfiguration configuration;
 	configuration.base = p_base;
 	configuration.material_override = p_material_override;
-	configuration.base_rid = configuration.base->get_rid();
-	configuration.material_rid = configuration.material_override.is_valid() ? configuration.material_override->get_rid() : RID();
 	configuration.shadow_casting = p_shadow_casting;
 	configuration.use_skeleton = p_use_skeleton;
-	const RID base_rid = configuration.base_rid;
-	const RID material_rid = configuration.material_rid;
-	const Ref<Resource> &material_override = configuration.material_override;
-	ERR_FAIL_COND_V(base_rid.is_null() || (material_override.is_valid() && material_rid.is_null()), ERR_INVALID_PARAMETER);
 	Vector<GeometryPipelineConfiguration> configurations;
 	configurations.push_back(configuration);
 	return _geometry_prepare_pipeline_configurations(configurations);

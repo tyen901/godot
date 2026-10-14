@@ -55,8 +55,6 @@ private:
 
 	Color base_color = Color(1, 1, 1, 1);
 
-	RID default_material;
-
 	void _initialize();
 
 protected:
@@ -87,7 +85,7 @@ public:
 
 	void generate_mipmaps();
 
-	DrawableTexture2D();
+	DrawableTexture2D() = default;
 	~DrawableTexture2D();
 };
 

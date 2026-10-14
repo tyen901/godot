@@ -191,6 +191,7 @@ class ConnectionOwnerLoader : public ResourceFormatLoader {
 public:
 	ObjectID signal_source;
 	bool propagated_source_alive = false;
+	bool deferred_connection = false;
 	void changed() {}
 	virtual bool recognize_path(const String &p_path, const String &p_for_type = String()) const override {
 		return p_path.get_extension() == "connectiontest";
@@ -204,6 +205,7 @@ public:
 			Ref<Resource> source;
 			source.instantiate();
 			signal_source = source->get_instance_id();
+			deferred_connection = !Thread::is_main_thread();
 			source->connect_changed(callable_mp(this, &ConnectionOwnerLoader::changed));
 			// The returned graph intentionally does not own the signal source.
 			resource.instantiate();
@@ -219,9 +221,23 @@ TEST_CASE("[ResourceLoader] Propagated changed connections retain their source t
 	Ref<ConnectionOwnerLoader> loader;
 	loader.instantiate();
 	ResourceLoader::add_resource_format_loader(loader, true);
-	Ref<Resource> resource = ResourceLoader::load("res://parent.connectiontest");
-	CHECK(resource.is_valid());
+	const String path = "res://parent.connectiontest";
+	CHECK(ResourceLoader::load_threaded_request(path) == OK);
+	uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 5000000;
+	while (ResourceLoader::load_threaded_get_status(path) == ResourceLoader::THREAD_LOAD_IN_PROGRESS && OS::get_singleton()->get_ticks_usec() < deadline) {
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(ResourceLoader::load_threaded_get_status(path) == ResourceLoader::THREAD_LOAD_LOADED);
+	CHECK(loader->deferred_connection);
 	CHECK(loader->propagated_source_alive);
+	CHECK(ObjectDB::get_instance(loader->signal_source) != nullptr);
+	Ref<Resource> resource = ResourceLoader::load_threaded_get(path);
+	CHECK(resource.is_valid());
+	deadline = OS::get_singleton()->get_ticks_usec() + 5000000;
+	while (ResourceLoader::has_pending_load(path) && OS::get_singleton()->get_ticks_usec() < deadline) {
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK_FALSE(ResourceLoader::has_pending_load(path));
 	CHECK(ObjectDB::get_instance(loader->signal_source) == nullptr);
 	resource.unref();
 	ResourceLoader::remove_resource_format_loader(loader);

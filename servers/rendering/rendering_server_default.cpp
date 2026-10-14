@@ -76,7 +76,6 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
-	RSG::scene->geometry_profile_begin_frame();
 
 	TIMESTAMP_BEGIN()
 
@@ -114,7 +113,6 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 
 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->end_frame");
 	RSG::rasterizer->end_frame(p_swap_buffers);
-	RSG::scene->geometry_profile_end_frame();
 
 #ifndef XR_DISABLED
 	if (xr_server != nullptr) {

@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include "core/variant/dictionary.h"
 #include "core/variant/typed_array.h"
 #include "core/variant/variant.h"
 #include "servers/rendering/rendering_server_enums.h"
@@ -128,11 +127,6 @@ public:
 
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) = 0;
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) = 0;
-
-	virtual int64_t request_geometry_profile() { return 0; }
-	virtual Dictionary get_geometry_profile() { return Dictionary(); }
-	virtual void geometry_profile_begin_frame() {}
-	virtual void geometry_profile_end_frame() {}
 
 	/* SKY API */
 

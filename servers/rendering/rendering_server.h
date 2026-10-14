@@ -196,9 +196,6 @@ public:
 
 	/* MESH API */
 
-	virtual int64_t request_geometry_profile() = 0;
-	virtual Dictionary get_geometry_profile() = 0;
-
 	virtual RID mesh_create_from_surfaces(const Vector<RenderingServerTypes::SurfaceData> &p_surfaces, int p_blend_shape_count = 0) = 0;
 	virtual RID mesh_create() = 0;
 

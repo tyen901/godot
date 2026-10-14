@@ -1608,22 +1608,6 @@ Variant RendererSceneCull::instance_geometry_get_shader_parameter_default_value(
 	return instance->instance_uniforms.get_default(p_parameter);
 }
 
-int64_t RendererSceneCull::request_geometry_profile() {
-	return scene_render->request_geometry_profile();
-}
-
-Dictionary RendererSceneCull::get_geometry_profile() {
-	return scene_render->get_geometry_profile();
-}
-
-void RendererSceneCull::geometry_profile_begin_frame() {
-	scene_render->geometry_profile_begin_frame();
-}
-
-void RendererSceneCull::geometry_profile_end_frame() {
-	scene_render->geometry_profile_end_frame();
-}
-
 void RendererSceneCull::mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) {
 	scene_render->mesh_generate_pipelines(p_mesh, p_background_compilation);
 }

@@ -716,9 +716,6 @@ public:
 #define ServerName RenderingMethod
 #define server_name RSG::scene
 
-	FUNC0R(int64_t, request_geometry_profile)
-	FUNC0R(Dictionary, get_geometry_profile)
-
 	/* CAMERA API */
 
 	FUNCRIDSPLIT(camera)

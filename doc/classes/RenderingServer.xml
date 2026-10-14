@@ -1669,14 +1669,6 @@
 				Returns the time taken to setup rendering on the CPU in milliseconds. This value is shared across all viewports and does [i]not[/i] require [method viewport_set_measure_render_time] to be enabled on a viewport to be queried. See also [method viewport_get_measured_render_time_cpu].
 			</description>
 		</method>
-		<method name="get_geometry_profile">
-			<return type="Dictionary" />
-			<description>
-				Returns the state of the explicit one-frame geometry submission capture requested by [method request_geometry_profile]. The dictionary contains [code]available[/code], [code]pending[/code], [code]completed[/code], [code]request_id[/code], [code]native_frame_id[/code], [code]recording_start_engine_ticks_usec[/code], [code]recording_end_engine_ticks_usec[/code], [code]rows[/code], [code]max_rows[/code], [code]truncated[/code], [code]dropped_rows[/code], and [code]lod_inputs_truncated[/code]. Unsupported renderers return [code]available = false[/code], [code]request_id = 0[/code], and an [code]unavailable_reason[/code]. Before the first request, Forward+ returns [code]completed = false[/code]. Pending captures do not expose partial rows. Each read exports a fresh copy of the completed snapshot.
-				Rows represent actual native geometry draw submissions across the complete captured frame, including probes, multiple viewports, depth, color, motion, and shadow passes. RID and draw-list identities are decimal strings. Rows include [code]base_rid[/code], [code]base_type[/code], actual [code]mesh_rid[/code], [code]surface_index[/code], [code]selected_lod[/code], [code]primitive_type[/code], [code]index_or_vertex_count[/code], [code]submitted_instance_count[/code], [code]submitted_primitives[/code], [code]indirect[/code], [code]indexed[/code], [code]selected_index_array_rid[/code], [code]framebuffer_rid[/code], [code]draw_list_id[/code], [code]repeat[/code], [code]point_size_emulated[/code], [code]pass_mode[/code], [code]pass_name[/code], [code]color_pass_flags[/code], native light-instance [code]light_rid[/code], [code]light_base_rid[/code], [code]shadow_pass[/code], [code]shadow_mesh_used[/code], world [code]aabb[/code], and [code]owner_transform[/code]. The [code]owner_count[/code], [code]aabb_scope[/code], and [code]owner_transform_scope[/code] fields explicitly identify the first-owner scope when an ordinary-mesh draw batches repeated owners; these bounds do not represent the whole repeated-owner draw. Indirect instance and primitive totals are [code]null[/code], since GPU command-buffer contents are not read back.
-				When [code]lod_input_available[/code] is true, a row also includes the native [code]lod_aabb_distance[/code], [code]lod_model_scale_times_bias[/code], [code]lod_distance_multiplier[/code], [code]lod_distance_threshold[/code], [code]screen_mesh_lod_threshold[/code], [code]lod_camera_orthogonal[/code], and [code]lod_selection_enabled[/code] inputs preserved alongside its render-list element. Missing bounded metadata is reported by [code]lod_inputs_truncated[/code]. No new LOD selection occurs. This capture is CPU submission evidence, not GPU execution timing or readback. Its engine-tick interval includes the capture overhead and must not be used as an uninstrumented frame timing sample.
-			</description>
-		</method>
 		<method name="get_rendering_device" qualifiers="const">
 			<return type="RenderingDevice" />
 			<description>
@@ -3591,12 +3583,6 @@
 			<param index="0" name="callable" type="Callable" />
 			<description>
 				Schedules a callback to the given callable after a frame has been drawn.
-			</description>
-		</method>
-		<method name="request_geometry_profile">
-			<return type="int" />
-			<description>
-				Requests an opt-in bounded capture of actual Forward+ geometry submissions for the next complete native rendering frame. Returns a positive request identifier, or [code]0[/code] when the renderer is unsupported. A repeated request while pending returns the existing identifier. The capture is disabled by default, stores at most 65,536 draw rows, and performs no GPU readback or per-draw timing query. All state changes and reads use the rendering server's native rendering-thread dispatch. Read [method get_geometry_profile] after completion; requesting another frame replaces the prior completed snapshot.
 			</description>
 		</method>
 		<method name="scenario_create">

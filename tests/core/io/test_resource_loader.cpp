@@ -190,6 +190,7 @@ TEST_CASE("[ResourceLoader] Main publication retains its reference-counted calla
 class ConnectionOwnerLoader : public ResourceFormatLoader {
 public:
 	ObjectID signal_source;
+	SafeNumeric<uint32_t> child_load_count;
 	bool propagated_source_alive = false;
 	bool deferred_connection = false;
 	void changed() {}
@@ -202,6 +203,7 @@ public:
 			resource = ResourceLoader::load("res://child.connectiontest");
 			propagated_source_alive = ObjectDB::get_instance(signal_source) != nullptr;
 		} else {
+			child_load_count.increment();
 			Ref<Resource> source;
 			source.instantiate();
 			signal_source = source->get_instance_id();
@@ -218,6 +220,17 @@ public:
 };
 
 TEST_CASE("[ResourceLoader] Propagated changed connections retain their source through the outer load") {
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	BlockPool blocked;
+	LocalVector<WorkerThreadPool::TaskID> blockers;
+	// Force the child to finish inline, then dispatch its queued callback on the
+	// same worker. That callback must retire its token without loading again.
+	for (int i = 1; i < pool->get_thread_count(); i++) {
+		blockers.push_back(pool->add_native_task(block_pool, &blocked, true));
+	}
+	for (uint32_t i = 0; i < blockers.size(); i++) {
+		blocked.entered.wait();
+	}
 	Ref<ConnectionOwnerLoader> loader;
 	loader.instantiate();
 	ResourceLoader::add_resource_format_loader(loader, true);
@@ -228,6 +241,11 @@ TEST_CASE("[ResourceLoader] Propagated changed connections retain their source t
 		OS::get_singleton()->delay_usec(1000);
 	}
 	CHECK(ResourceLoader::load_threaded_get_status(path) == ResourceLoader::THREAD_LOAD_LOADED);
+	while (ResourceLoader::has_pending_load("res://child.connectiontest") && OS::get_singleton()->get_ticks_usec() < deadline) {
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK_FALSE(ResourceLoader::has_pending_load("res://child.connectiontest"));
+	CHECK(loader->child_load_count.get() == 1);
 	CHECK(loader->deferred_connection);
 	CHECK(loader->propagated_source_alive);
 	CHECK(ObjectDB::get_instance(loader->signal_source) != nullptr);
@@ -241,6 +259,10 @@ TEST_CASE("[ResourceLoader] Propagated changed connections retain their source t
 	CHECK(ObjectDB::get_instance(loader->signal_source) == nullptr);
 	resource.unref();
 	ResourceLoader::remove_resource_format_loader(loader);
+	blocked.release.post(blockers.size());
+	for (WorkerThreadPool::TaskID blocker : blockers) {
+		CHECK(pool->wait_for_task_completion(blocker) == OK);
+	}
 }
 
 #endif

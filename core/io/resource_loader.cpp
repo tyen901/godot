@@ -342,6 +342,11 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 			load_task.status = THREAD_LOAD_FAILED;
 			return;
 		}
+		// A queued callback can return to the same worker after inline completion.
+		// Its token still needs retiring, but the format loader must not run twice.
+		if (load_task.status != THREAD_LOAD_IN_PROGRESS) {
+			return;
+		}
 
 		if (load_task.started_load && load_task.thread_index != thread_index) {
 			// If we were already waiting for task completion in a previous

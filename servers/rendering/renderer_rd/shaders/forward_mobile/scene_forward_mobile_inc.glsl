@@ -233,9 +233,9 @@ bool sc_material_feedback() {
 	return ((sc_packed_2() >> 1) & 1U) != 0;
 }
 
-layout(constant_id = 3) const bool sc_emulate_point_size = false;
-
 #ifdef POINT_SIZE_USED
+
+layout(constant_id = 3) const bool sc_emulate_point_size = false;
 
 #define VERTEX_INDEX (sc_emulate_point_size ? gl_InstanceIndex : gl_VertexIndex)
 #define INSTANCE_INDEX (sc_emulate_point_size ? (gl_VertexIndex / 6) : gl_InstanceIndex)

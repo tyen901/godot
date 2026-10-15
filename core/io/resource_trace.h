@@ -36,6 +36,10 @@
 namespace ResourceTrace {
 bool enabled();
 String field(const char *p_key, const String &p_value);
+// Call only while enabled. SHA-256 covers the borrowed bytes, without a domain prefix or terminator.
+String bytes_fields(const char *p_domain, const uint8_t *p_data, size_t p_size);
+// Descriptor hashes cover exactly the UTF-8 text stored in the descriptor field, without its JSON escaping.
+String descriptor_fields(const char *p_domain, const String &p_descriptor);
 void event(const char *p_stage, const String &p_fields = String());
 class Scope {
 	uint64_t operation = 0;

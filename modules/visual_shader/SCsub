@@ -12,4 +12,15 @@ env_visual_shader.add_source_files(env.modules_sources, "*.cpp")
 env_visual_shader.add_source_files(env.modules_sources, "vs_nodes/*.cpp")
 
 if env.editor_build:
-    env_visual_shader.add_source_files(env.modules_sources, "editor/*.cpp")
+    # This large editor TU need not generate DWARF when the final link discards it.
+    strip_debug = any("--strip-debug" in str(flag).split(",") for flag in env["LINKFLAGS"])
+    if env["platform"] == "linuxbsd" and not env["scu_build"] and strip_debug:
+        editor_source = "editor/visual_shader_editor_plugin.cpp"
+        env_visual_shader.add_source_files(
+            env.modules_sources, env_visual_shader.Glob("editor/*.cpp", exclude=[editor_source])
+        )
+        env_visual_shader_editor = env_visual_shader.Clone()
+        env_visual_shader_editor.Append(CCFLAGS=["-g0"])
+        env_visual_shader_editor.add_source_files(env.modules_sources, editor_source)
+    else:
+        env_visual_shader.add_source_files(env.modules_sources, "editor/*.cpp")

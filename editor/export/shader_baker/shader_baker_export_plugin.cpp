@@ -472,18 +472,29 @@ void ShaderBakerExportPlugin::_process_work_item(WorkItem p_work_item) {
 	RESOURCE_TRACE_SCOPE(trace_work, "shader_baker_work", ResourceTrace::field("shader_family", p_work_item.shader_name) + ResourceTrace::field("cache_path", p_work_item.cache_path) + ResourceTrace::field("variant", itos(p_work_item.variant)));
 	if (!tasks_cancelled) {
 		// Only process the item if the tasks haven't been cancelled by the user yet.
+		RESOURCE_TRACE_SCOPE(trace_compile, "shader_baker_stage_compile", String());
 		Vector<RD::ShaderStageSPIRVData> spirv_data = ShaderRD::compile_stages(p_work_item.stage_sources, p_work_item.dynamic_buffers);
+		if (ResourceTrace::enabled()) {
+			trace_compile.finish(ResourceTrace::field("success", uitos(uint64_t(!spirv_data.is_empty()))));
+		}
 		if (unlikely(spirv_data.is_empty())) {
 			ERR_PRINT("Unable to retrieve SPIR-V data for shader.");
 		} else {
+			RESOURCE_TRACE_SCOPE(trace_container, "shader_baker_container_encode", String());
 			Ref<RenderingShaderContainer> shader_container = shader_container_format->create_container();
 
 			// Compile shader binary from SPIR-V.
 			bool code_compiled = shader_container->set_code_from_spirv(p_work_item.shader_name, spirv_data);
 			if (unlikely(!code_compiled)) {
+				if (ResourceTrace::enabled()) {
+					trace_container.finish(ResourceTrace::field("success", "0"));
+				}
 				ERR_PRINT("Failed to compile code to native for SPIR-V.");
 			} else {
 				PackedByteArray shader_bytes = shader_container->to_bytes();
+				if (ResourceTrace::enabled()) {
+					trace_container.finish(ResourceTrace::field("success", uitos(uint64_t(!shader_bytes.is_empty()))) + ResourceTrace::field("container_bytes", uitos(shader_bytes.size())));
+				}
 				{
 					MutexLock lock(shader_work_results_mutex);
 					shader_work_results[p_work_item.cache_path].variant_data.ptrw()[p_work_item.variant] = shader_bytes;

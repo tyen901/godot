@@ -189,9 +189,6 @@ void Object::_initialize() {
 }
 
 void Object::_postinitialize() {
-	if (_uses_signal_mutex()) {
-		signal_mutex = memnew(Mutex);
-	}
 	notification(NOTIFICATION_POSTINITIALIZE);
 }
 
@@ -987,6 +984,12 @@ void Object::_gdvirtual_init_method_ptr(uint32_t p_compat_hash, void *&r_fn_ptr,
 }
 
 void Object::_notification_forward(int p_notification) {
+	// GDExtension constructors send POSTINITIALIZE directly after attaching their
+	// extension instance, without calling _postinitialize(). Initialize before
+	// notifying derived classes so their signal connections are synchronized too.
+	if (p_notification == NOTIFICATION_POSTINITIALIZE && !signal_mutex && _uses_signal_mutex()) {
+		signal_mutex = memnew(Mutex);
+	}
 	// Notify classes starting with Object and ending with most derived subclass.
 	// e.g. Object -> Node -> Node3D
 	_notification_forwardv(p_notification);

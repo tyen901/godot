@@ -76,6 +76,15 @@
 				[b]Note:[/b] When using indices, it is recommended to only use points, lines, or triangles.
 			</description>
 		</method>
+		<method name="set_surfaces_from_arrays">
+			<return type="int" enum="Error" />
+			<param index="0" name="surfaces" type="Dictionary[]" />
+			<description>
+				Constructs all surfaces of a fresh [ArrayMesh] in one native allocation. Every dictionary requires [code]primitive[/code] and [code]arrays[/code]. Optional [code]blend_shapes[/code], [code]lods[/code] and [code]flags[/code] have the same meaning and defaults as [method add_surface_from_arrays]. Optional [code]material[/code] is a [Material] resource and [code]name[/code] is a [String]. The array must contain between one and [constant RenderingServer.MAX_MESH_SURFACES] entries.
+				All descriptors are validated and packed by the engine before any mesh is created. The mesh retains each material, name, format, bounds and authored LOD. Materials are installed before native mesh pipeline preparation. Instance material overrides remain the responsibility of native surface preparation.
+				Returns [constant OK] on success, [constant ERR_ALREADY_IN_USE] if the mesh already has a native RID or surfaces, or a packing/validation error without changing the mesh. Call this before [method Mesh.get_rid], setting [member custom_aabb], or exposing the mesh to an instance. Blend shape names and mode may be configured beforehand. An existing mesh is never replaced by this method.
+			</description>
+		</method>
 		<method name="clear_blend_shapes">
 			<return type="void" />
 			<description>

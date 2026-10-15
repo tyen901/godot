@@ -35,10 +35,68 @@ TEST_FORCE_LINK(test_arraymesh)
 #ifndef _3D_DISABLED
 
 #include "scene/resources/3d/primitive_meshes.h"
+#include "scene/resources/material.h"
 #include "scene/resources/mesh.h"
 #include "servers/rendering/rendering_server.h"
 
 namespace TestArrayMesh {
+
+TEST_CASE("[SceneTree][ArrayMesh] Bulk arrays preserve native surface ownership.") {
+	Ref<ArrayMesh> mesh;
+	mesh.instantiate();
+	Array arrays;
+	arrays.resize(Mesh::ARRAY_MAX);
+	arrays[Mesh::ARRAY_VERTEX] = PackedVector3Array{ Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(1, 1, 0) };
+	arrays[Mesh::ARRAY_INDEX] = PackedInt32Array{ 0, 2, 1, 1, 2, 3 };
+	Dictionary lods;
+	lods[10.0] = PackedInt32Array{ 0, 2, 1 };
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	Dictionary descriptor;
+	descriptor["primitive"] = Mesh::PRIMITIVE_TRIANGLES;
+	descriptor["arrays"] = arrays;
+	descriptor["lods"] = lods;
+	descriptor["material"] = material;
+	descriptor["name"] = "Authored surface";
+	TypedArray<Dictionary> descriptors;
+	descriptors.push_back(descriptor);
+
+	SUBCASE("A malformed later descriptor leaves the fresh owner available.") {
+		Dictionary malformed;
+		malformed["primitive"] = Mesh::PRIMITIVE_TRIANGLES;
+		descriptors.push_back(malformed);
+		ERR_PRINT_OFF
+		CHECK(mesh->set_surfaces_from_arrays(descriptors) == ERR_INVALID_PARAMETER);
+		ERR_PRINT_ON
+		CHECK(mesh->get_surface_count() == 0);
+		descriptors.resize(1);
+		REQUIRE(mesh->set_surfaces_from_arrays(descriptors) == OK);
+		CHECK(mesh->get_surface_count() == 1);
+	}
+
+	SUBCASE("Material references, names, bounds and LODs belong to the mesh.") {
+		descriptors.push_back(descriptor);
+		REQUIRE(mesh->set_surfaces_from_arrays(descriptors) == OK);
+		CHECK(mesh->get_surface_count() == 2);
+		CHECK(mesh->surface_get_material(1) == material);
+		CHECK(mesh->surface_get_name(1) == "Authored surface");
+		CHECK(mesh->surface_get_array_index_len(1) == 6);
+		CHECK(mesh->surface_get_lods(1).has(10.0));
+		CHECK(mesh->get_aabb().size == Vector3(1, 1, 0));
+		ERR_PRINT_OFF
+		CHECK(mesh->set_surfaces_from_arrays(descriptors) == ERR_ALREADY_IN_USE);
+		ERR_PRINT_ON
+		CHECK(mesh->get_surface_count() == 2);
+	}
+
+	SUBCASE("An escaped native RID prevents bulk construction.") {
+		CHECK(mesh->get_rid().is_valid());
+		ERR_PRINT_OFF
+		CHECK(mesh->set_surfaces_from_arrays(descriptors) == ERR_ALREADY_IN_USE);
+		ERR_PRINT_ON
+		CHECK(mesh->get_surface_count() == 0);
+	}
+}
 
 TEST_CASE("[SceneTree][ArrayMesh] Adding and modifying blendshapes.") {
 	Ref<ArrayMesh> mesh;

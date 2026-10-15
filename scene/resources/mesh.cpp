@@ -1705,6 +1705,10 @@ void ArrayMesh::_set_surfaces(const Array &p_surfaces) {
 		surface_2d.push_back(_2d);
 	}
 
+	_set_surfaces_data(surface_data, surface_materials, surface_names, surface_2d);
+}
+
+void ArrayMesh::_set_surfaces_data(const Vector<RenderingServerTypes::SurfaceData> &surface_data, const Vector<Ref<Material>> &surface_materials, const Vector<String> &surface_names, const Vector<bool> &surface_2d) {
 	if (mesh.is_valid()) {
 		//if mesh exists, it needs to be updated
 		RS::get_singleton()->mesh_clear(mesh);
@@ -1842,6 +1846,80 @@ void ArrayMesh::add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_prim
 	clear_cache();
 	notify_property_list_changed();
 	emit_changed();
+}
+
+Error ArrayMesh::set_surfaces_from_arrays(const TypedArray<Dictionary> &p_surfaces) {
+	// Bulk construction must happen before any RID escapes. Updating an existing
+	// mesh uses queued mutations and cannot provide resource-load preparation.
+	if (mesh.is_valid() || !surfaces.is_empty()) {
+		return ERR_ALREADY_IN_USE;
+	}
+	if (p_surfaces.is_empty() || p_surfaces.size() > RSE::MAX_MESH_SURFACES) {
+		return ERR_INVALID_PARAMETER;
+	}
+
+	Vector<RenderingServerTypes::SurfaceData> surface_data;
+	Vector<Ref<Material>> surface_materials;
+	Vector<String> surface_names;
+	Vector<bool> surface_2d;
+
+	for (int i = 0; i < p_surfaces.size(); i++) {
+		Dictionary descriptor = p_surfaces[i];
+		if (!descriptor.has("primitive") || descriptor["primitive"].get_type() != Variant::INT || !descriptor.has("arrays") || descriptor["arrays"].get_type() != Variant::ARRAY ||
+				(descriptor.has("blend_shapes") && descriptor["blend_shapes"].get_type() != Variant::ARRAY) ||
+				(descriptor.has("lods") && descriptor["lods"].get_type() != Variant::DICTIONARY) ||
+				(descriptor.has("flags") && descriptor["flags"].get_type() != Variant::INT) ||
+				(descriptor.has("name") && descriptor["name"].get_type() != Variant::STRING)) {
+			return ERR_INVALID_PARAMETER;
+		}
+		int64_t primitive = descriptor["primitive"];
+		if (primitive < 0 || primitive >= RSE::PRIMITIVE_MAX) {
+			return ERR_INVALID_PARAMETER;
+		}
+
+		Array arrays = descriptor["arrays"];
+		Array surface_blend_shapes = descriptor.get("blend_shapes", Array());
+		if (surface_blend_shapes.size() != blend_shapes.size()) {
+			return ERR_INVALID_PARAMETER;
+		}
+		for (int j = 0; j < surface_blend_shapes.size(); j++) {
+			if (surface_blend_shapes[j].get_type() != Variant::ARRAY) {
+				return ERR_INVALID_PARAMETER;
+			}
+		}
+		Ref<Material> material;
+		if (descriptor.has("material") && descriptor["material"].get_type() != Variant::NIL) {
+			if (descriptor["material"].get_type() != Variant::OBJECT) {
+				return ERR_INVALID_PARAMETER;
+			}
+			material = descriptor["material"];
+			if (material.is_null()) {
+				return ERR_INVALID_PARAMETER;
+			}
+		}
+
+		RenderingServerTypes::SurfaceData surface;
+		Error err = RS::get_singleton()->mesh_create_surface_data_from_arrays(&surface, RSE::PrimitiveType(primitive), arrays, surface_blend_shapes, descriptor.get("lods", Dictionary()), descriptor.get("flags", 0));
+		if (err != OK) {
+			return err;
+		}
+		surface_data.push_back(surface);
+		surface_materials.push_back(material);
+		surface_names.push_back(descriptor.get("name", String()));
+		surface_2d.push_back(surface.format & ARRAY_FLAG_USE_2D_VERTICES);
+	}
+
+	// All validation and engine packing precede allocation. The same resource
+	// owner path as native mesh loading installs materials before Mesh preparation.
+	for (int i = 0; i < surface_data.size(); i++) {
+		if (surface_materials[i].is_valid()) {
+			surface_data.write[i].material = surface_materials[i]->get_rid();
+		}
+	}
+	_set_surfaces_data(surface_data, surface_materials, surface_names, surface_2d);
+	notify_property_list_changed();
+	emit_changed();
+	return OK;
 }
 
 void ArrayMesh::add_surface_from_arrays(PrimitiveType p_primitive, const Array &p_arrays, const TypedArray<Array> &p_blend_shapes, const Dictionary &p_lods, BitField<ArrayFormat> p_flags) {
@@ -2324,6 +2402,7 @@ void ArrayMesh::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_blend_shape_mode", "mode"), &ArrayMesh::set_blend_shape_mode);
 	ClassDB::bind_method(D_METHOD("get_blend_shape_mode"), &ArrayMesh::get_blend_shape_mode);
 
+	ClassDB::bind_method(D_METHOD("set_surfaces_from_arrays", "surfaces"), &ArrayMesh::set_surfaces_from_arrays);
 	ClassDB::bind_method(D_METHOD("add_surface_from_arrays", "primitive", "arrays", "blend_shapes", "lods", "flags"), &ArrayMesh::add_surface_from_arrays, DEFVAL(Array()), DEFVAL(Dictionary()), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("clear_surfaces"), &ArrayMesh::clear_surfaces);
 	ClassDB::bind_method(D_METHOD("surface_remove", "surf_idx"), &ArrayMesh::surface_remove);

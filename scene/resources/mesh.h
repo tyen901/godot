@@ -329,6 +329,7 @@ private:
 	AABB custom_aabb;
 
 	_FORCE_INLINE_ void _create_if_empty() const;
+	void _set_surfaces_data(const Vector<RenderingServerTypes::SurfaceData> &surface_data, const Vector<Ref<Material>> &surface_materials, const Vector<String> &surface_names, const Vector<bool> &surface_2d);
 	void _recompute_aabb();
 
 protected:
@@ -344,6 +345,7 @@ protected:
 	static void _bind_methods();
 
 public:
+	Error set_surfaces_from_arrays(const TypedArray<Dictionary> &p_surfaces);
 	void add_surface_from_arrays(PrimitiveType p_primitive, const Array &p_arrays, const TypedArray<Array> &p_blend_shapes = TypedArray<Array>(), const Dictionary &p_lods = Dictionary(), BitField<ArrayFormat> p_flags = 0);
 
 	void add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_primitive, const Vector<uint8_t> &p_array, const Vector<uint8_t> &p_attribute_array, const Vector<uint8_t> &p_skin_array, int p_vertex_count, const Vector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<uint8_t> &p_blend_shape_data = Vector<uint8_t>(), const Vector<AABB> &p_bone_aabbs = Vector<AABB>(), const Vector<RenderingServerTypes::SurfaceData::LOD> &p_lods = Vector<RenderingServerTypes::SurfaceData::LOD>(), const Vector4 p_uv_scale = Vector4());

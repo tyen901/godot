@@ -5726,7 +5726,7 @@ RDD::RenderPassID RenderingDeviceDriverVulkan::render_pass_create(VectorView<Att
 	if (ResourceTrace::enabled()) {
 		// Values are read from normalized Vulkan create-info fields, never struct bytes/padding.
 		// Record the API route: the existing legacy conversion drops subpass extension/aspect fields.
-		String description = vformat("{\"render_pass2\":%d,\"flags\":%d,\"view_count\":%d,\"correlation_mask\":%d,\"attachments\":[", device_functions.CreateRenderPass2KHR != nullptr, create_info.flags, p_view_count, p_view_count == 1 ? 0 : correlation_mask);
+		String description = vformat("{\"render_pass2\":%d,\"flags\":%d,\"view_count\":%d,\"correlation_mask\":%d,\"attachments\":[", int(device_functions.CreateRenderPass2KHR != nullptr), create_info.flags, p_view_count, p_view_count == 1 ? 0 : correlation_mask);
 		for (uint32_t i = 0; i < create_info.attachmentCount; i++) {
 			if (i) {
 				description += ",";

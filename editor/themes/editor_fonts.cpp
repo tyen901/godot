@@ -165,7 +165,7 @@ void editor_register_fonts(const Ref<Theme> &p_theme) {
 
 	String noto_cjk_path;
 	String noto_cjk_bold_path;
-	{
+	if (OS::get_singleton()->has_feature("system_fonts")) {
 		Vector<String> var_suffix;
 
 		// Note: Most Noto Sans CJK versions support all glyph variations, but select the best matching one in case it's not.

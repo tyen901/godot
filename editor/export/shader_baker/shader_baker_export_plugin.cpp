@@ -33,6 +33,7 @@
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
+#include "core/io/resource_trace.h"
 #include "core/string/string_builder.h"
 #include "core/version.h"
 #include "editor/editor_node.h"
@@ -92,6 +93,7 @@ bool ShaderBakerExportPlugin::_initialize_cache_directory() {
 }
 
 bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportPlatform> &p_platform, const Vector<String> &p_features) {
+	RESOURCE_TRACE_SCOPE(trace_begin, "shader_baker_begin", ResourceTrace::field("platform", p_platform->get_os_name()));
 	if (!_is_active(p_features)) {
 		return false;
 	}
@@ -138,9 +140,13 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP16_BIT);
 	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP32_BIT);
 
-	RendererSceneRenderRD::get_singleton()->enable_features(renderer_features);
+	{
+		RESOURCE_TRACE_SCOPE(trace_features, "shader_baker_enable_features", ResourceTrace::field("renderer", shader_cache_renderer_name) + ResourceTrace::field("driver", shader_container_driver) + ResourceTrace::field("features", uitos(uint64_t(renderer_features))));
+		RendererSceneRenderRD::get_singleton()->enable_features(renderer_features);
+	}
 
 	// Included all shaders created by renderers and effects.
+	RESOURCE_TRACE_SCOPE(trace_embedded, "shader_baker_embedded_admission", String());
 	ShaderRD::shaders_embedded_set_lock();
 	const ShaderRD::ShaderVersionPairSet &pair_set = ShaderRD::shaders_embedded_set_get();
 	for (Pair<ShaderRD *, RID> pair : pair_set) {
@@ -148,8 +154,10 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	}
 
 	ShaderRD::shaders_embedded_set_unlock();
+	trace_embedded.finish();
 
 	// Include all shaders created by embedded materials.
+	RESOURCE_TRACE_SCOPE(trace_materials, "shader_baker_material_admission", String());
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	material_storage->shader_embedded_set_lock();
 	const HashSet<RID> &rid_set = material_storage->shader_embedded_set_get();
@@ -164,6 +172,10 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	}
 
 	material_storage->shader_embedded_set_unlock();
+	trace_materials.finish();
+	if (ResourceTrace::enabled()) {
+		trace_begin.finish(ResourceTrace::field("initialized", "1") + ResourceTrace::field("task_count", uitos(tasks_total)) + ResourceTrace::field("group_count", uitos(shader_group_items.size())));
+	}
 
 	return true;
 }
@@ -182,11 +194,13 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 }
 
 void ShaderBakerExportPlugin::_end_customize_resources() {
+	RESOURCE_TRACE_SCOPE(trace_end, "shader_baker_complete", ResourceTrace::field("task_count", uitos(tasks_total)) + ResourceTrace::field("group_count", uitos(shader_group_items.size())));
 	if (!_initialize_cache_directory()) {
 		return;
 	}
 
 	// Run a progress bar that waits for all shader baking tasks to finish.
+	RESOURCE_TRACE_SCOPE(trace_progress, "shader_baker_progress_wait", ResourceTrace::field("task_count", uitos(tasks_total)));
 	bool progress_active = true;
 	EditorProgress editor_progress("baking_shaders", TTR("Baking shaders"), tasks_total);
 	editor_progress.step("Baking...", 0);
@@ -208,9 +222,12 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 			progress_active = false;
 		}
 	}
+	trace_progress.finish();
 
 	String shader_cache_user_dir = ShaderRD::get_shader_cache_user_dir();
 	for (const ShaderGroupItem &group_item : shader_group_items) {
+		// Cache paths link completion to admission without retaining native shader/version owners.
+		RESOURCE_TRACE_SCOPE(trace_group, "shader_baker_group_complete", ResourceTrace::field("cache_path", group_item.cache_path) + ResourceTrace::field("task_count", uitos(group_item.variant_tasks.size())));
 		// Wait for all shader compilation tasks of the group to be finished.
 		for (WorkerThreadPool::TaskID task_id : group_item.variant_tasks) {
 			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id);
@@ -225,6 +242,7 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 
 			PackedByteArray cache_file_bytes = ShaderRD::save_shader_cache_bytes(group_item.variants, work_result.variant_data);
 			add_file(shader_cache_user_dir.path_join(group_item.cache_path), cache_file_bytes, false);
+			RESOURCE_TRACE_EVENT("shader_baker_cache_packed", ResourceTrace::field("cache_path", group_item.cache_path) + ResourceTrace::field("cache_bytes", uitos(cache_file_bytes.size())));
 
 			String cache_file_path = shader_cache_export_path.path_join(group_item.cache_path);
 			if (!DirAccess::exists(cache_file_path)) {
@@ -235,6 +253,9 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 			if (cache_file_access.is_valid()) {
 				cache_file_access->store_buffer(cache_file_bytes);
 			}
+		}
+		if (ResourceTrace::enabled()) {
+			trace_group.finish(ResourceTrace::field("cancelled", uitos(uint64_t(tasks_cancelled.load()))));
 		}
 	}
 
@@ -272,6 +293,9 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 	shader_group_items.clear();
 
 	_cleanup_container_format();
+	if (ResourceTrace::enabled()) {
+		trace_end.finish(ResourceTrace::field("cancelled", uitos(uint64_t(tasks_cancelled.load()))));
+	}
 }
 
 Ref<Resource> ShaderBakerExportPlugin::_customize_resource(const Ref<Resource> &p_resource, const String &p_path) {
@@ -371,6 +395,8 @@ uint64_t ShaderBakerExportPlugin::_get_customization_configuration_hash() const 
 }
 
 void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID p_version) {
+	RESOURCE_TRACE_SCOPE(trace_version, "shader_baker_version_admission", ResourceTrace::field("shader_family", p_shader->get_name()) + ResourceTrace::field("version_rid", uitos(p_version.get_id())));
+	const uint32_t tasks_before = tasks_total;
 	const int64_t variant_count = p_shader->get_variant_count();
 	const int64_t group_count = p_shader->get_group_count();
 	LocalVector<ShaderGroupItem> group_items;
@@ -382,8 +408,12 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 			continue;
 		}
 
+		RESOURCE_TRACE_SCOPE(trace_group, "shader_baker_group_setup", ResourceTrace::field("shader_family", p_shader->get_name()) + ResourceTrace::field("version_rid", uitos(p_version.get_id())) + ResourceTrace::field("group", itos(i)));
 		String cache_path = p_shader->version_get_cache_file_relative_path(p_version, i, shader_container_driver);
 		if (shader_paths_processed.has(cache_path)) {
+			if (ResourceTrace::enabled()) {
+				trace_group.finish(ResourceTrace::field("cache_path", cache_path) + ResourceTrace::field("already_processed", "1"));
+			}
 			continue;
 		}
 
@@ -397,6 +427,9 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 			MutexLock lock(shader_work_results_mutex);
 			shader_work_results[cache_path].variant_data.resize(variant_count);
 		}
+		if (ResourceTrace::enabled()) {
+			trace_group.finish(ResourceTrace::field("cache_path", cache_path) + ResourceTrace::field("already_processed", "0") + ResourceTrace::field("variant_count", uitos(group_items[i].variants.size())));
+		}
 	}
 
 	for (int64_t i = 0; i < variant_count; i++) {
@@ -405,6 +438,7 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 			continue;
 		}
 
+		RESOURCE_TRACE_SCOPE(trace_variant, "shader_baker_variant_admission", ResourceTrace::field("shader_family", p_shader->get_name()) + ResourceTrace::field("version_rid", uitos(p_version.get_id())) + ResourceTrace::field("group", itos(group)) + ResourceTrace::field("variant", itos(i)) + ResourceTrace::field("cache_path", group_items[group].cache_path));
 		WorkItem work_item;
 		work_item.cache_path = group_items[group].cache_path;
 		work_item.shader_name = p_shader->get_name();
@@ -415,14 +449,27 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(this, &ShaderBakerExportPlugin::_process_work_item, work_item);
 		group_items[group].variant_tasks.push_back(task_id);
 		tasks_total++;
+		if (ResourceTrace::enabled()) {
+			uint64_t source_chars = 0;
+			for (const String &source : work_item.stage_sources) {
+				source_chars += source.length();
+			}
+			// Logical UTF-32 payload only; excludes terminators, capacity and shared storage.
+			trace_variant.finish(ResourceTrace::field("task_id", itos(task_id)) + ResourceTrace::field("source_chars", uitos(source_chars)) + ResourceTrace::field("source_codepoint_bytes", uitos(source_chars * sizeof(char32_t))) + ResourceTrace::field("tasks_total", uitos(tasks_total)));
+		}
 	}
 
 	for (uint32_t i : groups_to_compile) {
 		shader_group_items.push_back(group_items[i]);
+		RESOURCE_TRACE_EVENT("shader_baker_group_admitted", ResourceTrace::field("shader_family", p_shader->get_name()) + ResourceTrace::field("version_rid", uitos(p_version.get_id())) + ResourceTrace::field("group", uitos(i)) + ResourceTrace::field("cache_path", group_items[i].cache_path) + ResourceTrace::field("task_count", uitos(group_items[i].variant_tasks.size())));
+	}
+	if (ResourceTrace::enabled()) {
+		trace_version.finish(ResourceTrace::field("task_count", uitos(tasks_total - tasks_before)) + ResourceTrace::field("group_count", uitos(groups_to_compile.size())));
 	}
 }
 
 void ShaderBakerExportPlugin::_process_work_item(WorkItem p_work_item) {
+	RESOURCE_TRACE_SCOPE(trace_work, "shader_baker_work", ResourceTrace::field("shader_family", p_work_item.shader_name) + ResourceTrace::field("cache_path", p_work_item.cache_path) + ResourceTrace::field("variant", itos(p_work_item.variant)));
 	if (!tasks_cancelled) {
 		// Only process the item if the tasks haven't been cancelled by the user yet.
 		Vector<RD::ShaderStageSPIRVData> spirv_data = ShaderRD::compile_stages(p_work_item.stage_sources, p_work_item.dynamic_buffers);

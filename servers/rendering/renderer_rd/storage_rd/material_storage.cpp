@@ -33,6 +33,7 @@
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/io/resource_loader.h"
+#include "core/io/resource_trace.h"
 #include "core/math/projection.h"
 #include "core/templates/local_vector.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
@@ -2239,6 +2240,7 @@ void MaterialStorage::shader_free(RID p_rid) {
 }
 
 void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
+	RESOURCE_TRACE_SCOPE(trace_code, "material_shader_set_code", ResourceTrace::field("rs_shader_rid", uitos(p_shader.get_id())) + ResourceTrace::field("source_sha256", p_code.sha256_text()));
 	Shader *shader = shader_owner.get_or_null(p_shader);
 	ERR_FAIL_NULL(shader);
 
@@ -2308,8 +2310,13 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 	}
 
 	if (shader->data) {
+		RESOURCE_TRACE_EVENT("material_shader_prepare", ResourceTrace::field("path", shader->path_hint) + ResourceTrace::field("rs_shader_rid", uitos(p_shader.get_id())) + ResourceTrace::field("shader_data_ptr", uitos(uint64_t(shader->data))));
 		shader->data->set_path_hint(shader->path_hint);
 		shader->data->set_code(p_code);
+		if (ResourceTrace::enabled()) {
+			const auto native = shader->data->get_native_shader_and_version();
+			RESOURCE_TRACE_EVENT("material_shader", ResourceTrace::field("path", shader->path_hint) + ResourceTrace::field("rs_shader_rid", uitos(uint64_t(p_shader.get_id()))) + ResourceTrace::field("shader_data_ptr", uitos(uint64_t(shader->data))) + ResourceTrace::field("version_rid", uitos(uint64_t(native.second.get_id()))));
+		}
 	}
 
 	for (Material *E : shader->owners) {

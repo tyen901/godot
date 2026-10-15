@@ -34,6 +34,7 @@
 #include "core/io/compression.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/io/resource_trace.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
 #include "core/string/string_builder.h"
@@ -245,6 +246,7 @@ RID ShaderRD::version_create(bool p_embedded) {
 
 	version.mutex = memnew(Mutex);
 	RID rid = version_owner.make_rid(version);
+	RESOURCE_TRACE_EVENT("shader_version", ResourceTrace::field("shader_family", name) + ResourceTrace::field("version_rid", uitos(uint64_t(rid.get_id()))) + ResourceTrace::field("version_ptr", uitos(uint64_t(version_owner.get_or_null(rid)))));
 	{
 		MutexLock lock(versions_mutex);
 		version_mutexes.insert(rid, version.mutex);
@@ -419,6 +421,7 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 		return; // Variant is disabled, return.
 	}
 
+	RESOURCE_TRACE_SCOPE(trace_variant, "shader_variant_compile", ResourceTrace::field("shader_family", name) + ResourceTrace::field("version_ptr", uitos(uint64_t(p_data.version))) + ResourceTrace::field("variant", uitos(uint64_t(variant))) + ResourceTrace::field("group", uitos(uint64_t(p_data.group))));
 	Vector<String> variant_stage_sources = _build_variant_stage_sources(variant, p_data);
 	Vector<RD::ShaderStageSPIRVData> variant_stages = compile_stages(variant_stage_sources, dynamic_buffers);
 	ERR_FAIL_COND(variant_stages.is_empty());
@@ -429,6 +432,7 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 	{
 		p_data.version->variants.write[variant] = RD::get_singleton()->shader_create_from_bytecode_with_samplers(shader_data, p_data.version->variants[variant], immutable_samplers);
 		p_data.version->variant_data.write[variant] = shader_data;
+		RESOURCE_TRACE_EVENT("variant_shader", ResourceTrace::field("shader_family", name) + ResourceTrace::field("version_ptr", uitos(uint64_t(p_data.version))) + ResourceTrace::field("variant", uitos(uint64_t(variant))) + ResourceTrace::field("rd_shader_rid", uitos(uint64_t(p_data.version->variants[variant].get_id()))));
 	}
 }
 
@@ -622,6 +626,7 @@ String ShaderRD::_get_cache_file_path(Version *p_version, int p_group, const Str
 }
 
 void ShaderRD::_load_variant_from_cache(uint32_t p_variant, CompileData p_data) {
+	RESOURCE_TRACE_SCOPE(trace_cache_variant, "shader_variant_cache_restore", ResourceTrace::field("shader_family", name) + ResourceTrace::field("version_ptr", uitos(uint64_t(p_data.version))) + ResourceTrace::field("variant", uitos(uint64_t(group_to_variant_map[p_data.group][p_variant]))) + ResourceTrace::field("group", uitos(uint64_t(p_data.group))));
 	uint32_t variant = group_to_variant_map[p_data.group][p_variant];
 	if (!variants_enabled[variant]) {
 		p_data.version->variants.write[variant] = RID();
@@ -629,16 +634,19 @@ void ShaderRD::_load_variant_from_cache(uint32_t p_variant, CompileData p_data) 
 	}
 
 	p_data.version->variants.write[variant] = RD::get_singleton()->shader_create_from_bytecode_with_samplers(p_data.version->variant_data[variant], p_data.version->variants[variant], immutable_samplers);
+	RESOURCE_TRACE_EVENT("variant_shader", ResourceTrace::field("shader_family", name) + ResourceTrace::field("version_ptr", uitos(uint64_t(p_data.version))) + ResourceTrace::field("variant", uitos(uint64_t(variant))) + ResourceTrace::field("rd_shader_rid", uitos(uint64_t(p_data.version->variants[variant].get_id()))));
 }
 
 bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 	String api_safe_name = String(RD::get_singleton()->get_device_api_name()).validate_filename().to_lower();
 	Ref<FileAccess> f;
 	if (shader_cache_user_dir_valid) {
+		RESOURCE_TRACE_EVENT("shader_cache_path", ResourceTrace::field("path", _get_cache_file_path(p_version, p_group, api_safe_name, true)));
 		f = FileAccess::open(_get_cache_file_path(p_version, p_group, api_safe_name, true), FileAccess::READ);
 	}
 
 	if (f.is_null() && shader_cache_res_dir_valid) {
+		RESOURCE_TRACE_EVENT("shader_cache_path", ResourceTrace::field("path", _get_cache_file_path(p_version, p_group, api_safe_name, false)));
 		f = FileAccess::open(_get_cache_file_path(p_version, p_group, api_safe_name, false), FileAccess::READ);
 	}
 
@@ -728,7 +736,12 @@ void ShaderRD::_compile_version_start(Version *p_version, int p_group) {
 
 #if ENABLE_SHADER_CACHE
 	if (shader_cache_user_dir_valid || shader_cache_res_dir_valid) {
-		if (_load_from_cache(p_version, p_group)) {
+		RESOURCE_TRACE_SCOPE(trace_cache, "shader_cache_load", ResourceTrace::field("shader_family", name) + ResourceTrace::field("version_ptr", uitos(uint64_t(p_version))) + ResourceTrace::field("group", uitos(uint64_t(p_group))));
+		bool cache_hit = _load_from_cache(p_version, p_group);
+		if (ResourceTrace::enabled()) {
+			trace_cache.finish(ResourceTrace::field("hit", uitos(uint64_t(cache_hit))));
+		}
+		if (cache_hit) {
 			return;
 		}
 	}
@@ -748,7 +761,9 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 		return;
 	}
 	WorkerThreadPool::GroupID group_task = p_version->group_compilation_tasks[p_group];
+	RESOURCE_TRACE_SCOPE(trace_join, "shader_group_wait", ResourceTrace::field("shader_family", name) + ResourceTrace::field("version_ptr", uitos(uint64_t(p_version))) + ResourceTrace::field("group", uitos(uint64_t(p_group))) + ResourceTrace::field("task_id", uitos(uint64_t(group_task))));
 	WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
+	trace_join.finish();
 	p_version->group_compilation_tasks.write[p_group] = 0;
 
 	bool all_valid = true;
@@ -1171,7 +1186,11 @@ Vector<RD::ShaderStageSPIRVData> ShaderRD::compile_stages(const Vector<String> &
 			continue;
 		}
 
+		RESOURCE_TRACE_SCOPE(trace_spirv, "shader_stage_spirv", ResourceTrace::field("shader_stage", uitos(uint64_t(i))) + ResourceTrace::field("source_chars", uitos(uint64_t(p_stage_sources[i].length()))) + ResourceTrace::field("source_sha256", p_stage_sources[i].sha256_text()));
 		stage.spirv = RD::get_singleton()->shader_compile_spirv_from_source(RD::ShaderStage(i), p_stage_sources[i], RD::SHADER_LANGUAGE_GLSL, &error);
+		if (ResourceTrace::enabled()) {
+			trace_spirv.finish(ResourceTrace::field("spirv_bytes", uitos(uint64_t(stage.spirv.size()))));
+		}
 		stage.dynamic_buffers = p_dynamic_buffers;
 		stage.shader_stage = RD::ShaderStage(i);
 		if (!stage.spirv.is_empty()) {

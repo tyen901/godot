@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/io/resource_trace.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/mutex.h"
 #include "core/templates/hash_map.h"
@@ -150,6 +151,7 @@ public:
 		// Queue a background compilation task.
 		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(creation_object, creation_function, p_key, p_high_priority, "PipelineCompilation");
 		compilation_tasks.insert(p_key_hash, task_id);
+		RESOURCE_TRACE_EVENT("pipeline_task", ResourceTrace::field("shader_data_ptr", uitos(uint64_t(creation_object))) + ResourceTrace::field("key_hash", uitos(uint64_t(p_key_hash))) + ResourceTrace::field("source", uitos(uint64_t(p_source))) + ResourceTrace::field("high_priority", uitos(uint64_t(p_high_priority))) + ResourceTrace::field("task_id", uitos(uint64_t(task_id))));
 	}
 
 	void wait_for_pipeline(uint32_t p_key_hash) {
@@ -171,6 +173,7 @@ public:
 		}
 
 		if (task_id_to_wait != WorkerThreadPool::INVALID_TASK_ID) {
+			RESOURCE_TRACE_SCOPE(trace_wait, "pipeline_task_wait", ResourceTrace::field("shader_data_ptr", uitos(uint64_t(creation_object))) + ResourceTrace::field("key_hash", uitos(uint64_t(p_key_hash))) + ResourceTrace::field("task_id", uitos(uint64_t(task_id_to_wait))));
 			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id_to_wait);
 		}
 	}

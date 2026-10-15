@@ -32,6 +32,7 @@
 #include "shader.compat.inc"
 
 #include "core/config/engine.h"
+#include "core/io/resource_trace.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "scene/main/scene_tree.h"
@@ -52,7 +53,9 @@ Shader::Mode Shader::get_mode() const {
 void Shader::_check_shader_rid() const {
 	MutexLock lock(shader_rid_mutex);
 	if (shader_rid.is_null() && !preprocessed_code.is_empty()) {
+		RESOURCE_TRACE_SCOPE(trace_create, "resource_shader_create", ResourceTrace::field("shader_object_id", uitos(uint64_t(get_instance_id()))) + ResourceTrace::field("path", get_path()));
 		shader_rid = RenderingServer::get_singleton()->shader_create_from_code(preprocessed_code, get_path());
+		RESOURCE_TRACE_EVENT("resource_shader", ResourceTrace::field("shader_object_id", uitos(uint64_t(get_instance_id()))) + ResourceTrace::field("rs_shader_rid", uitos(shader_rid.get_id())) + ResourceTrace::field("path", get_path()));
 		preprocessed_code = String();
 	}
 }

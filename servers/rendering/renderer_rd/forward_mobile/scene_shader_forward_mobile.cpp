@@ -31,6 +31,7 @@
 #include "scene_shader_forward_mobile.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/resource_trace.h"
 #include "core/math/math_defs.h"
 #include "servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
@@ -284,6 +285,7 @@ Pair<ShaderRD *, RID> SceneShaderForwardMobile::ShaderData::get_native_shader_an
 }
 
 void SceneShaderForwardMobile::ShaderData::_create_pipeline(PipelineKey p_pipeline_key) {
+	RESOURCE_TRACE_SCOPE(trace_pipeline, "forward_mobile_pipeline", ResourceTrace::field("path", path) + ResourceTrace::field("shader_data_ptr", uitos(uint64_t(this))) + ResourceTrace::field("version_rid", uitos(uint64_t(version.get_id()))) + ResourceTrace::field("key_hash", uitos(uint64_t(p_pipeline_key.hash()))) + ResourceTrace::field("vertex_format_id", uitos(uint64_t(p_pipeline_key.vertex_format_id))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(p_pipeline_key.framebuffer_format_id))) + ResourceTrace::field("cull_mode", uitos(uint64_t(p_pipeline_key.cull_mode))) + ResourceTrace::field("primitive_type", uitos(uint64_t(p_pipeline_key.primitive_type))) + ResourceTrace::field("version", uitos(uint64_t(p_pipeline_key.version))) + ResourceTrace::field("render_pass", uitos(uint64_t(p_pipeline_key.render_pass))) + ResourceTrace::field("wireframe", uitos(uint64_t(p_pipeline_key.wireframe))) + ResourceTrace::field("ubershader", uitos(uint64_t(p_pipeline_key.ubershader))) + ResourceTrace::field("packed_0", uitos(uint64_t(p_pipeline_key.shader_specialization.packed_0))) + ResourceTrace::field("packed_1", uitos(uint64_t(p_pipeline_key.shader_specialization.packed_1))) + ResourceTrace::field("packed_2", uitos(uint64_t(p_pipeline_key.shader_specialization.packed_2))));
 #if PRINT_PIPELINE_COMPILATION_KEYS
 	print_line(
 			"HASH:", p_pipeline_key.hash(),
@@ -448,7 +450,11 @@ void SceneShaderForwardMobile::ShaderData::_create_pipeline(PipelineKey p_pipeli
 	sc.type = RD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL;
 	specialization_constants.push_back(sc);
 
+	RESOURCE_TRACE_SCOPE(trace_variant_wait, "pipeline_shader_variant_wait", String());
 	RID shader_rid = get_shader_variant(p_pipeline_key.version, p_pipeline_key.ubershader);
+	if (ResourceTrace::enabled()) {
+		trace_variant_wait.finish(ResourceTrace::field("rd_shader_rid", uitos(uint64_t(shader_rid.get_id()))));
+	}
 	ERR_FAIL_COND(shader_rid.is_null());
 
 	RID pipeline = RD::get_singleton()->render_pipeline_create(shader_rid, p_pipeline_key.framebuffer_format_id, p_pipeline_key.vertex_format_id, primitive_rd, raster_state, multisample_state, depth_stencil_state, blend_state, 0, p_pipeline_key.render_pass, specialization_constants);
@@ -460,6 +466,9 @@ void SceneShaderForwardMobile::ShaderData::_create_pipeline(PipelineKey p_pipeli
 
 	ERR_FAIL_COND(pipeline.is_null());
 
+	if (ResourceTrace::enabled()) {
+		trace_pipeline.finish(ResourceTrace::field("pipeline_rid", uitos(uint64_t(pipeline.get_id()))));
+	}
 	pipeline_hash_map.add_compiled_pipeline(p_pipeline_key.hash(), pipeline);
 }
 

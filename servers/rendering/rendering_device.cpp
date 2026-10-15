@@ -35,6 +35,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/io/resource_trace.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
@@ -2731,6 +2732,7 @@ void RenderingDevice::_texture_clear_depth_stencil(RID p_texture_rid, Texture *p
 }
 
 Vector<uint8_t> RenderingDevice::texture_get_data(RID p_texture, uint32_t p_layer) {
+	RESOURCE_TRACE_SCOPE(trace_stage, "texture_readback", ResourceTrace::field("texture_rid", uitos(uint64_t(p_texture.get_id()))) + ResourceTrace::field("layer", uitos(uint64_t(p_layer))));
 	ERR_RENDER_THREAD_GUARD_V(Vector<uint8_t>());
 
 	Texture *tex = texture_owner.get_or_null(p_texture);
@@ -4252,6 +4254,7 @@ String RenderingDevice::_shader_uniform_debug(RID p_shader, int p_set) {
 }
 
 Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+	RESOURCE_TRACE_SCOPE(trace_stage, "shader_binary", ResourceTrace::field("shader_name", p_shader_name));
 	const RenderingShaderContainerFormat &container_format = driver->get_shader_container_format();
 	Ref<RenderingShaderContainer> shader_container = container_format.create_container();
 	ERR_FAIL_COND_V(shader_container.is_null(), Vector<uint8_t>());
@@ -4272,6 +4275,7 @@ RID RenderingDevice::shader_create_from_bytecode(const Vector<uint8_t> &p_shader
 }
 
 RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint8_t> &p_shader_binary, RID p_placeholder, const Vector<PipelineImmutableSampler> &p_immutable_samplers) {
+	RESOURCE_TRACE_SCOPE(trace_stage, "shader_from_bytecode", ResourceTrace::field("binary_bytes", uitos(uint64_t(p_shader_binary.size()))));
 	Ref<RenderingShaderContainer> shader_container = driver->get_shader_container_format().create_container();
 	ERR_FAIL_COND_V(shader_container.is_null(), RID());
 
@@ -4313,6 +4317,7 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 	shader->name.clear();
 	shader->name.append_utf8(shader_container->shader_name);
 	shader->driver_id = shader_id;
+	RESOURCE_TRACE_EVENT("rd_shader", ResourceTrace::field("rd_shader_rid", uitos(uint64_t(id.get_id()))) + ResourceTrace::field("driver_shader_id", uitos(uint64_t(shader_id.id))) + ResourceTrace::field("shader_name", shader->name));
 	shader->layout_hash = driver->shader_get_layout_hash(shader_id);
 
 	for (int i = 0; i < shader->uniform_sets.size(); i++) {
@@ -5064,6 +5069,7 @@ RID RenderingDevice::render_pipeline_create(RID p_shader, FramebufferFormatID p_
 		}
 	}
 
+	RESOURCE_TRACE_SCOPE(trace_pipeline, "rd_render_pipeline", ResourceTrace::field("rd_shader_rid", uitos(uint64_t(p_shader.get_id()))) + ResourceTrace::field("driver_shader_id", uitos(uint64_t(shader->driver_id.id))) + ResourceTrace::field("vertex_format_id", uitos(uint64_t(p_vertex_format))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(p_framebuffer_format))) + ResourceTrace::field("render_pass", uitos(uint64_t(p_for_render_pass))));
 	RenderPipeline pipeline;
 	pipeline.driver_id = driver->render_pipeline_create(
 			shader->driver_id,
@@ -5126,6 +5132,9 @@ RID RenderingDevice::render_pipeline_create(RID p_shader, FramebufferFormatID p_
 
 	// Create ID to associate with this pipeline.
 	RID id = render_pipeline_owner.make_rid(pipeline);
+	if (ResourceTrace::enabled()) {
+		trace_pipeline.finish(ResourceTrace::field("pipeline_rid", uitos(uint64_t(id.get_id()))) + ResourceTrace::field("driver_pipeline_id", uitos(uint64_t(pipeline.driver_id.id))));
+	}
 	{
 		_THREAD_SAFE_METHOD_
 

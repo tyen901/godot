@@ -32,6 +32,7 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/io/resource_trace.h"
 #include "core/os/os.h"
 #include "core/templates/fixed_vector.h"
 #include "drivers/vulkan/vulkan_hooks.h"
@@ -3116,7 +3117,11 @@ Error RenderingDeviceDriverVulkan::fence_wait(FenceID p_fence) {
 	Fence *fence = (Fence *)(p_fence.id);
 	VkResult fence_status = vkGetFenceStatus(vk_device, fence->vk_fence);
 	if (fence_status == VK_NOT_READY) {
+		RESOURCE_TRACE_SCOPE(trace_fence, "vkWaitForFences", ResourceTrace::field("fence_id", uitos(uint64_t(p_fence.id))) + ResourceTrace::field("vk_fence", uitos(uint64_t(fence->vk_fence))));
 		VkResult err = vkWaitForFences(vk_device, 1, &fence->vk_fence, VK_TRUE, UINT64_MAX);
+		if (ResourceTrace::enabled()) {
+			trace_fence.finish(ResourceTrace::field("result", itos(err)));
+		}
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't wait for Vulkan fence (VkResult error %d).", err));
 	}
 
@@ -3323,8 +3328,14 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		submit_info.signalSemaphoreCount = signal_semaphores.size();
 		submit_info.pSignalSemaphores = signal_semaphores.ptr();
 
+		RESOURCE_TRACE_SCOPE(trace_queue_lock, "vulkan_submit_lock", ResourceTrace::field("queue_id", uitos(uint64_t(p_cmd_queue.id))));
 		device_queue.submit_mutex.lock();
+		trace_queue_lock.finish();
+		RESOURCE_TRACE_SCOPE(trace_submit, "vkQueueSubmit", ResourceTrace::field("queue_id", uitos(uint64_t(p_cmd_queue.id))) + ResourceTrace::field("fence_id", uitos(uint64_t(p_cmd_fence.id))) + ResourceTrace::field("vk_fence", uitos(uint64_t(vk_fence))) + ResourceTrace::field("command_buffers", uitos(uint64_t(p_cmd_buffers.size()))) + ResourceTrace::field("swap_chains", uitos(uint64_t(p_swap_chains.size()))));
 		err = vkQueueSubmit(device_queue.queue, 1, &submit_info, vk_fence);
+		if (ResourceTrace::enabled()) {
+			trace_submit.finish(ResourceTrace::field("result", itos(err)));
+		}
 		device_queue.submit_mutex.unlock();
 
 		if (err == VK_ERROR_DEVICE_LOST) {
@@ -4301,6 +4312,7 @@ static VkShaderStageFlagBits RD_STAGE_TO_VK_SHADER_STAGE_BITS[RDD::SHADER_STAGE_
 };
 
 RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) {
+	RESOURCE_TRACE_SCOPE(trace_container, "vulkan_shader_container", ResourceTrace::field("shader_name", String::utf8(p_shader_container->shader_name.get_data())));
 	ShaderReflection shader_refl = p_shader_container->get_shader_reflection();
 	ShaderInfo shader_info;
 	shader_info.name = p_shader_container->shader_name.get_data();
@@ -4411,10 +4423,12 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 	}
 
 	for (int i = 0; i < stage_count; i++) {
+		RESOURCE_TRACE_SCOPE(trace_stage, "vulkan_shader_stage", ResourceTrace::field("shader_stage", uitos(uint64_t(shader_refl.stages_vector[i]))));
 		const RenderingShaderContainer::Shader &shader = p_shader_container->shaders[i];
 		bool requires_decompression = (shader.code_decompressed_size > 0);
 		if (requires_decompression) {
 			decompressed_code.resize(shader.code_decompressed_size);
+			RESOURCE_TRACE_SCOPE(trace_decompress, "shader_decompress", ResourceTrace::field("compressed_bytes", uitos(uint64_t(shader.code_compressed_bytes.size()))));
 			bool decompressed = p_shader_container->decompress_code(shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size(), shader.code_compression_flags, decompressed_code.ptrw(), decompressed_code.size());
 			if (!decompressed) {
 				error_text = vformat("Failed to decompress code on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
@@ -4431,7 +4445,12 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 				break;
 			}
 
-			if (!smolv::Decode(smolv_input, smolv_input_size, decoded_spirv.ptrw(), decoded_spirv.size())) {
+			RESOURCE_TRACE_SCOPE(trace_smolv, "shader_smolv_decode", ResourceTrace::field("compressed_bytes", uitos(uint64_t(smolv_input_size))));
+			bool smolv_ok = smolv::Decode(smolv_input, smolv_input_size, decoded_spirv.ptrw(), decoded_spirv.size());
+			if (ResourceTrace::enabled()) {
+				trace_smolv.finish(ResourceTrace::field("success", uitos(uint64_t(smolv_ok))));
+			}
+			if (!smolv_ok) {
 				error_text = vformat("Malformed smolv input on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
 				break;
 			}
@@ -4444,7 +4463,11 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 
 		if (use_respv) {
 			const bool inline_data = store_respv || (RESPV_ONLY_INLINE_SHADERS_WITH_SPEC_CONSTANTS == 0);
+			RESOURCE_TRACE_SCOPE(trace_parse, "respirv_parse", ResourceTrace::field("spirv_bytes", uitos(uint64_t(decoded_spirv.size()))) + ResourceTrace::field("inline", uitos(uint64_t(inline_data))));
 			respv::Shader respv_shader(decoded_spirv.ptr(), decoded_spirv.size(), inline_data);
+			if (ResourceTrace::enabled()) {
+				trace_parse.finish(ResourceTrace::field("empty", uitos(uint64_t(respv_shader.empty()))));
+			}
 			if (respv_shader.empty()) {
 #if RESPV_VERBOSE
 				print_line("re-spirv failed to parse the shader, skipping optimization.");
@@ -4456,7 +4479,12 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 				shader_info.respv_stage_shaders.push_back(respv_shader);
 			} else {
 				std::vector<uint8_t> respv_optimized_data;
-				if (respv::Optimizer::run(respv_shader, nullptr, 0, respv_optimized_data)) {
+				RESOURCE_TRACE_SCOPE(trace_optimize, "respirv_optimize", String());
+				bool optimized = respv::Optimizer::run(respv_shader, nullptr, 0, respv_optimized_data);
+				if (ResourceTrace::enabled()) {
+					trace_optimize.finish(ResourceTrace::field("success", uitos(uint64_t(optimized))) + ResourceTrace::field("output_bytes", uitos(uint64_t(respv_optimized_data.size()))));
+				}
+				if (optimized) {
 #if RESPV_VERBOSE
 					print_line(vformat("re-spirv transformed the shader from %d bytes to %d bytes.", decoded_spirv.size(), respv_optimized_data.size()));
 #endif
@@ -4480,7 +4508,11 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		shader_module_create_info.pCode = (const uint32_t *)(decoded_spirv.ptr());
 
 		POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_LOCK
+		RESOURCE_TRACE_SCOPE(trace_module, "vkCreateShaderModule", ResourceTrace::field("spirv_bytes", uitos(uint64_t(decoded_spirv.size()))));
 		res = vkCreateShaderModule(vk_device, &shader_module_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SHADER_MODULE), &vk_module);
+		if (ResourceTrace::enabled()) {
+			trace_module.finish(ResourceTrace::field("result", itos(res)));
+		}
 		POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_UNLOCK
 
 		if (res != VK_SUCCESS) {
@@ -4566,6 +4598,9 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 	// Bookkeep.
 	ShaderInfo *shader_info_ptr = VersatileResource::allocate<ShaderInfo>(resources_allocator);
 	*shader_info_ptr = shader_info;
+	if (ResourceTrace::enabled()) {
+		trace_container.finish(ResourceTrace::field("driver_shader_id", uitos(uint64_t(shader_info_ptr))));
+	}
 	return ShaderID(shader_info_ptr);
 }
 
@@ -6212,7 +6247,12 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 #if RESPV_DONT_REMOVE_DEAD_CODE
 				respv_options.removeDeadCode = false;
 #endif
-				if (respv::Optimizer::run(shader_info->respv_stage_shaders[i], respv_spec_constants.ptr(), respv_spec_constants.size(), respv_optimized_data, respv_options)) {
+				RESOURCE_TRACE_SCOPE(trace_specialize, "respirv_specialize", ResourceTrace::field("driver_shader_id", uitos(uint64_t(p_shader.id))) + ResourceTrace::field("shader_stage", uitos(uint64_t(vk_pipeline_stages[i].stage))) + ResourceTrace::field("input_bytes", uitos(uint64_t(shader_info->respv_stage_shaders[i].inlinedSpirvWords.size() * sizeof(uint32_t)))));
+				bool optimized = respv::Optimizer::run(shader_info->respv_stage_shaders[i], respv_spec_constants.ptr(), respv_spec_constants.size(), respv_optimized_data, respv_options);
+				if (ResourceTrace::enabled()) {
+					trace_specialize.finish(ResourceTrace::field("success", uitos(uint64_t(optimized))) + ResourceTrace::field("output_bytes", uitos(uint64_t(respv_optimized_data.size()))));
+				}
+				if (optimized) {
 #if RESPV_VERBOSE
 					String spec_constants;
 					for (uint32_t j = 0; j < p_specialization_constants.size(); j++) {
@@ -6233,7 +6273,11 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 					shader_module_create_info.codeSize = respv_optimized_data.size();
 
 					POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_LOCK
+					RESOURCE_TRACE_SCOPE(trace_module, "vkCreateShaderModule_specialized", ResourceTrace::field("driver_shader_id", uitos(uint64_t(p_shader.id))) + ResourceTrace::field("shader_stage", uitos(uint64_t(vk_pipeline_stages[i].stage))) + ResourceTrace::field("spirv_bytes", uitos(uint64_t(respv_optimized_data.size()))));
 					VkResult err = vkCreateShaderModule(vk_device, &shader_module_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SHADER_MODULE), &shader_module);
+					if (ResourceTrace::enabled()) {
+						trace_module.finish(ResourceTrace::field("result", itos(err)));
+					}
 					POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_UNLOCK
 
 					if (err == VK_SUCCESS) {
@@ -6300,7 +6344,11 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 	VkPipeline vk_pipeline = VK_NULL_HANDLE;
 
 	POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_LOCK
+	RESOURCE_TRACE_SCOPE(trace_vk_pipeline, "vkCreateGraphicsPipelines", ResourceTrace::field("driver_shader_id", uitos(uint64_t(p_shader.id))));
 	VkResult err = vkCreateGraphicsPipelines(vk_device, pipelines_cache.vk_cache, 1, &pipeline_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE), &vk_pipeline);
+	if (ResourceTrace::enabled()) {
+		trace_vk_pipeline.finish(ResourceTrace::field("result", itos(err)) + ResourceTrace::field("driver_pipeline_id", uitos(uint64_t(vk_pipeline))));
+	}
 	POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_UNLOCK
 
 	// Don't print error for VK_ERROR_UNKNOWN on Adreno 660.

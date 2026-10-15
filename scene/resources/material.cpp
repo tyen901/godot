@@ -34,6 +34,7 @@
 #include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
 #include "core/io/resource_loader.h"
+#include "core/io/resource_trace.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/object/property_info.h"
@@ -475,6 +476,7 @@ void ShaderMaterial::_check_material_rid() const {
 		}
 
 		_set_material(RS::get_singleton()->material_create_from_shader(next_pass_rid, get_render_priority(), shader_rid));
+		RESOURCE_TRACE_EVENT("shader_material", ResourceTrace::field("material_object_id", uitos(uint64_t(get_instance_id()))) + ResourceTrace::field("material_rid", uitos(uint64_t(_get_material().get_id()))) + ResourceTrace::field("rs_shader_rid", uitos(uint64_t(shader_rid.get_id()))));
 
 		for (KeyValue<StringName, Variant> param : param_cache) {
 			if (param.value.get_type() == Variant::OBJECT) {

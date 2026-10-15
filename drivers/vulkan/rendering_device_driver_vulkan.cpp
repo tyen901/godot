@@ -2903,6 +2903,35 @@ RDD::VertexFormatID RenderingDeviceDriverVulkan::vertex_format_create(Span<Verte
 	vf_info->vk_create_info.vertexAttributeDescriptionCount = vf_info->vk_attributes.size();
 	vf_info->vk_create_info.pVertexAttributeDescriptions = vf_info->vk_attributes.ptr();
 
+	if (ResourceTrace::enabled()) {
+		struct BindingLess {
+			bool operator()(const VkVertexInputBindingDescription &p_a, const VkVertexInputBindingDescription &p_b) const { return p_a.binding < p_b.binding; }
+		};
+		struct LocationLess {
+			bool operator()(const VkVertexInputAttributeDescription &p_a, const VkVertexInputAttributeDescription &p_b) const { return p_a.location < p_b.location; }
+		};
+		// Sort temporary copies, never the arrays supplied to Vulkan.
+		LocalVector<VkVertexInputBindingDescription> bindings(vf_info->vk_bindings.span());
+		LocalVector<VkVertexInputAttributeDescription> attributes(vf_info->vk_attributes.span());
+		bindings.sort_custom<BindingLess>();
+		attributes.sort_custom<LocationLess>();
+		String description = "{\"bindings\":[";
+		for (uint32_t i = 0; i < bindings.size(); i++) {
+			if (i) {
+				description += ",";
+			}
+			description += vformat("{\"binding\":%d,\"stride\":%d,\"input_rate\":%d}", bindings[i].binding, bindings[i].stride, bindings[i].inputRate);
+		}
+		description += "],\"attributes\":[";
+		for (uint32_t i = 0; i < attributes.size(); i++) {
+			if (i) {
+				description += ",";
+			}
+			description += vformat("{\"location\":%d,\"binding\":%d,\"format\":%d,\"offset\":%d}", attributes[i].location, attributes[i].binding, attributes[i].format, attributes[i].offset);
+		}
+		description += "]}";
+		ResourceTrace::event("vulkan_vertex_format", ResourceTrace::field("driver_vertex_format_id", uitos(uint64_t(vf_info))) + ResourceTrace::descriptor_fields("vk-vertex-input-v1:descriptor-utf8", description));
+	}
 	return VertexFormatID(vf_info);
 }
 
@@ -4312,7 +4341,7 @@ static VkShaderStageFlagBits RD_STAGE_TO_VK_SHADER_STAGE_BITS[RDD::SHADER_STAGE_
 };
 
 RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) {
-	RESOURCE_TRACE_SCOPE(trace_container, "vulkan_shader_container", ResourceTrace::field("shader_name", String::utf8(p_shader_container->shader_name.get_data())));
+	RESOURCE_TRACE_SCOPE(trace_container, "vulkan_shader_container", ResourceTrace::field("vk_device", uitos(uint64_t(vk_device))) + ResourceTrace::field("shader_name", String::utf8(p_shader_container->shader_name.get_data())));
 	ShaderReflection shader_refl = p_shader_container->get_shader_reflection();
 	ShaderInfo shader_info;
 	shader_info.name = p_shader_container->shader_name.get_data();
@@ -4423,7 +4452,7 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 	}
 
 	for (int i = 0; i < stage_count; i++) {
-		RESOURCE_TRACE_SCOPE(trace_stage, "vulkan_shader_stage", ResourceTrace::field("shader_stage", uitos(uint64_t(shader_refl.stages_vector[i]))));
+		RESOURCE_TRACE_SCOPE(trace_stage, "vulkan_shader_stage", ResourceTrace::field("shader_stage", uitos(uint64_t(shader_refl.stages_vector[i]))) + ResourceTrace::field("stage_index", itos(i)) + ResourceTrace::field("vk_shader_stage", uitos(uint64_t(RD_STAGE_TO_VK_SHADER_STAGE_BITS[shader_refl.stages_vector[i]]))));
 		const RenderingShaderContainer::Shader &shader = p_shader_container->shaders[i];
 		bool requires_decompression = (shader.code_decompressed_size > 0);
 		if (requires_decompression) {
@@ -4460,6 +4489,7 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		}
 
 		shader_info.original_stage_size.push_back(decoded_spirv.size());
+		RESOURCE_TRACE_EVENT("vulkan_shader_decoded", ResourceTrace::bytes_fields("spirv-decoded-pre-respirv-v1:raw-bytes", decoded_spirv.ptr(), decoded_spirv.size()));
 
 		if (use_respv) {
 			const bool inline_data = store_respv || (RESPV_ONLY_INLINE_SHADERS_WITH_SPEC_CONSTANTS == 0);
@@ -4507,11 +4537,16 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		shader_module_create_info.codeSize = decoded_spirv.size();
 		shader_module_create_info.pCode = (const uint32_t *)(decoded_spirv.ptr());
 
+		String trace_module_fields;
+		if (ResourceTrace::enabled()) {
+			// Hash before entering the driver workaround lock; borrow bytes without retaining them.
+			trace_module_fields = ResourceTrace::field("spirv_bytes", uitos(uint64_t(decoded_spirv.size()))) + ResourceTrace::field("vk_shader_stage", uitos(uint64_t(RD_STAGE_TO_VK_SHADER_STAGE_BITS[shader_refl.stages_vector[i]]))) + ResourceTrace::bytes_fields("spirv-vkCreateShaderModule-pCode-v1:raw-bytes", (const uint8_t *)shader_module_create_info.pCode, shader_module_create_info.codeSize);
+		}
 		POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_LOCK
-		RESOURCE_TRACE_SCOPE(trace_module, "vkCreateShaderModule", ResourceTrace::field("spirv_bytes", uitos(uint64_t(decoded_spirv.size()))));
+		RESOURCE_TRACE_SCOPE(trace_module, "vkCreateShaderModule", trace_module_fields);
 		res = vkCreateShaderModule(vk_device, &shader_module_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SHADER_MODULE), &vk_module);
 		if (ResourceTrace::enabled()) {
-			trace_module.finish(ResourceTrace::field("result", itos(res)));
+			trace_module.finish(ResourceTrace::field("result", itos(res)) + ResourceTrace::field("vk_shader_module", uitos(res == VK_SUCCESS ? uint64_t(vk_module) : 0)));
 		}
 		POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_UNLOCK
 
@@ -5493,6 +5528,44 @@ static void _attachment_reference_to_vk(const RDD::AttachmentReference &p_attach
 	r_vk_attachment_reference->aspectMask = (VkImageAspectFlags)p_attachment_reference.aspect;
 }
 
+static String _resource_trace_vk_references(const VkAttachmentReference2KHR *p_references, uint32_t p_count) {
+	if (!p_references) {
+		return "null";
+	}
+	String text = "[";
+	for (uint32_t i = 0; i < p_count; i++) {
+		if (i) {
+			text += ",";
+		}
+		text += vformat("{\"attachment\":%d,\"layout\":%d,\"aspect_mask\":%d}", p_references[i].attachment, p_references[i].layout, p_references[i].aspectMask);
+	}
+	return text + "]";
+}
+
+// Expand the two subpass extension structures constructed by render_pass_create below.
+static String _resource_trace_vk_subpass_extensions(const void *p_next) {
+	String text = "[";
+	const VkBaseInStructure *extension = (const VkBaseInStructure *)p_next;
+	while (extension) {
+		if (text.length() > 1) {
+			text += ",";
+		}
+		text += vformat("{\"s_type\":%d", extension->sType);
+		if (extension->sType == VK_STRUCTURE_TYPE_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR) {
+			const VkFragmentShadingRateAttachmentInfoKHR *fsr = (const VkFragmentShadingRateAttachmentInfoKHR *)extension;
+			text += ",\"attachment\":" + _resource_trace_vk_references(fsr->pFragmentShadingRateAttachment, 1) + vformat(",\"texel_size\":[%d,%d]", fsr->shadingRateAttachmentTexelSize.width, fsr->shadingRateAttachmentTexelSize.height);
+		} else if (extension->sType == VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE) {
+			const VkSubpassDescriptionDepthStencilResolveKHR *resolve = (const VkSubpassDescriptionDepthStencilResolveKHR *)extension;
+			text += ",\"attachment\":" + _resource_trace_vk_references(resolve->pDepthStencilResolveAttachment, 1) + vformat(",\"depth_mode\":%d,\"stencil_mode\":%d", resolve->depthResolveMode, resolve->stencilResolveMode);
+		} else {
+			text += ",\"unrecorded_extension\":true"; // Never silently claim a future extension was captured.
+		}
+		text += "}";
+		extension = extension->pNext;
+	}
+	return text + "]";
+}
+
 RDD::RenderPassID RenderingDeviceDriverVulkan::render_pass_create(VectorView<Attachment> p_attachments, VectorView<Subpass> p_subpasses, VectorView<SubpassDependency> p_subpass_dependencies, uint32_t p_view_count, AttachmentReference p_fragment_density_map_attachment) {
 	// These are only used if we use multiview but we need to define them in scope.
 	const uint32_t view_mask = (1 << p_view_count) - 1;
@@ -5650,6 +5723,53 @@ RDD::RenderPassID RenderingDeviceDriverVulkan::render_pass_create(VectorView<Att
 	RenderPassInfo *render_pass = VersatileResource::allocate<RenderPassInfo>(resources_allocator);
 	render_pass->vk_render_pass = vk_render_pass;
 	render_pass->uses_fragment_density_map = uses_fragment_density_map;
+	if (ResourceTrace::enabled()) {
+		// Values are read from normalized Vulkan create-info fields, never struct bytes/padding.
+		// Record the API route: the existing legacy conversion drops subpass extension/aspect fields.
+		String description = vformat("{\"render_pass2\":%d,\"flags\":%d,\"view_count\":%d,\"correlation_mask\":%d,\"attachments\":[", device_functions.CreateRenderPass2KHR != nullptr, create_info.flags, p_view_count, p_view_count == 1 ? 0 : correlation_mask);
+		for (uint32_t i = 0; i < create_info.attachmentCount; i++) {
+			if (i) {
+				description += ",";
+			}
+			const VkAttachmentDescription2KHR &attachment = vk_attachments[i];
+			description += vformat("{\"flags\":%d,\"format\":%d,\"samples\":%d,\"load_op\":%d,\"store_op\":%d,\"stencil_load_op\":%d,\"stencil_store_op\":%d,\"initial_layout\":%d,\"final_layout\":%d}", attachment.flags, attachment.format, attachment.samples, attachment.loadOp, attachment.storeOp, attachment.stencilLoadOp, attachment.stencilStoreOp, attachment.initialLayout, attachment.finalLayout);
+		}
+		description += "],\"subpasses\":[";
+		for (uint32_t i = 0; i < create_info.subpassCount; i++) {
+			if (i) {
+				description += ",";
+			}
+			const VkSubpassDescription2KHR &subpass = vk_subpasses[i];
+			description += vformat("{\"flags\":%d,\"bind_point\":%d,\"view_mask\":%d,\"input\":", subpass.flags, subpass.pipelineBindPoint, subpass.viewMask) + _resource_trace_vk_references(subpass.pInputAttachments, subpass.inputAttachmentCount) +
+					",\"color\":" + _resource_trace_vk_references(subpass.pColorAttachments, subpass.colorAttachmentCount) +
+					",\"resolve\":" + _resource_trace_vk_references(subpass.pResolveAttachments, subpass.colorAttachmentCount) +
+					",\"depth_stencil\":" + _resource_trace_vk_references(subpass.pDepthStencilAttachment, 1) +
+					",\"extensions\":" + _resource_trace_vk_subpass_extensions(subpass.pNext) + ",\"preserve\":[";
+			for (uint32_t j = 0; j < subpass.preserveAttachmentCount; j++) {
+				if (j) {
+					description += ",";
+				}
+				description += uitos(subpass.pPreserveAttachments[j]);
+			}
+			description += "]}";
+		}
+		description += "],\"dependencies\":[";
+		for (uint32_t i = 0; i < create_info.dependencyCount; i++) {
+			if (i) {
+				description += ",";
+			}
+			const VkSubpassDependency2KHR &dependency = vk_subpass_dependencies[i];
+			description += vformat("{\"src_subpass\":%d,\"dst_subpass\":%d,\"src_stage_mask\":%d,\"dst_stage_mask\":%d,\"src_access_mask\":%d,\"dst_access_mask\":%d,\"flags\":%d,\"view_offset\":%d}", dependency.srcSubpass, dependency.dstSubpass, dependency.srcStageMask, dependency.dstStageMask, dependency.srcAccessMask, dependency.dstAccessMask, dependency.dependencyFlags, dependency.viewOffset);
+		}
+		description += "],\"fragment_density_map\":";
+		if (uses_fragment_density_map) {
+			description += vformat("{\"attachment\":%d,\"layout\":%d}", p_fragment_density_map_attachment.attachment, RD_TO_VK_LAYOUT[p_fragment_density_map_attachment.layout]);
+		} else {
+			description += "null";
+		}
+		description += "}";
+		ResourceTrace::event("vulkan_render_pass", ResourceTrace::field("driver_render_pass_id", uitos(uint64_t(render_pass))) + ResourceTrace::field("vk_render_pass", uitos(uint64_t(vk_render_pass))) + ResourceTrace::descriptor_fields("vk-render-pass-create-info2-v1:descriptor-utf8", description));
+	}
 	return RenderPassID(render_pass);
 }
 
@@ -6272,11 +6392,15 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 					shader_module_create_info.pCode = (const uint32_t *)(respv_optimized_data.data());
 					shader_module_create_info.codeSize = respv_optimized_data.size();
 
+					String trace_module_fields;
+					if (ResourceTrace::enabled()) {
+						trace_module_fields = ResourceTrace::field("driver_shader_id", uitos(uint64_t(p_shader.id))) + ResourceTrace::field("shader_stage", uitos(uint64_t(vk_pipeline_stages[i].stage))) + ResourceTrace::field("vk_shader_stage", uitos(uint64_t(vk_pipeline_stages[i].stage))) + ResourceTrace::field("spirv_bytes", uitos(uint64_t(respv_optimized_data.size()))) + ResourceTrace::bytes_fields("spirv-vkCreateShaderModule-pCode-v1:raw-bytes", (const uint8_t *)shader_module_create_info.pCode, shader_module_create_info.codeSize);
+					}
 					POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_LOCK
-					RESOURCE_TRACE_SCOPE(trace_module, "vkCreateShaderModule_specialized", ResourceTrace::field("driver_shader_id", uitos(uint64_t(p_shader.id))) + ResourceTrace::field("shader_stage", uitos(uint64_t(vk_pipeline_stages[i].stage))) + ResourceTrace::field("spirv_bytes", uitos(uint64_t(respv_optimized_data.size()))));
+					RESOURCE_TRACE_SCOPE(trace_module, "vkCreateShaderModule_specialized", trace_module_fields);
 					VkResult err = vkCreateShaderModule(vk_device, &shader_module_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SHADER_MODULE), &shader_module);
 					if (ResourceTrace::enabled()) {
-						trace_module.finish(ResourceTrace::field("result", itos(err)));
+						trace_module.finish(ResourceTrace::field("result", itos(err)) + ResourceTrace::field("vk_shader_module", uitos(err == VK_SUCCESS ? uint64_t(shader_module) : 0)));
 					}
 					POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_UNLOCK
 
@@ -6320,6 +6444,20 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 				vk_pipeline_stages[i].pSpecializationInfo = specialization_info;
 			}
 		}
+		if (ResourceTrace::enabled()) {
+			String constants = "[";
+			if (vk_pipeline_stages[i].pSpecializationInfo) {
+				// This creation path maps each constant to the exact uint32_t int_value bits.
+				for (uint32_t j = 0; j < p_specialization_constants.size(); j++) {
+					if (j) {
+						constants += ",";
+					}
+					constants += vformat("{\"id\":%d,\"u32_bits\":%d}", p_specialization_constants[j].constant_id, p_specialization_constants[j].int_value);
+				}
+			}
+			constants += "]";
+			ResourceTrace::event("vulkan_pipeline_stage", ResourceTrace::field("vk_device", uitos(uint64_t(vk_device))) + ResourceTrace::field("driver_shader_id", uitos(uint64_t(p_shader.id))) + ResourceTrace::field("stage_index", uitos(i)) + ResourceTrace::field("vk_shader_stage", uitos(uint64_t(vk_pipeline_stages[i].stage))) + ResourceTrace::field("vk_shader_module", uitos(uint64_t(vk_pipeline_stages[i].module))) + ResourceTrace::field("entry_point", vk_pipeline_stages[i].pName) + ResourceTrace::field("driver_specialization", constants));
+		}
 	}
 
 	const RenderPassInfo *render_pass = (const RenderPassInfo *)(p_render_pass.id);
@@ -6344,7 +6482,7 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 	VkPipeline vk_pipeline = VK_NULL_HANDLE;
 
 	POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_LOCK
-	RESOURCE_TRACE_SCOPE(trace_vk_pipeline, "vkCreateGraphicsPipelines", ResourceTrace::field("driver_shader_id", uitos(uint64_t(p_shader.id))));
+	RESOURCE_TRACE_SCOPE(trace_vk_pipeline, "vkCreateGraphicsPipelines", ResourceTrace::field("driver_shader_id", uitos(uint64_t(p_shader.id))) + ResourceTrace::field("driver_vertex_format_id", uitos(uint64_t(p_vertex_format.id))) + ResourceTrace::field("driver_render_pass_id", uitos(uint64_t(p_render_pass.id))) + ResourceTrace::field("render_subpass", uitos(p_render_subpass)));
 	VkResult err = vkCreateGraphicsPipelines(vk_device, pipelines_cache.vk_cache, 1, &pipeline_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE), &vk_pipeline);
 	if (ResourceTrace::enabled()) {
 		trace_vk_pipeline.finish(ResourceTrace::field("result", itos(err)) + ResourceTrace::field("driver_pipeline_id", uitos(uint64_t(vk_pipeline))));

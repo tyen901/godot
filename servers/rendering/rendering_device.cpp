@@ -3570,6 +3570,50 @@ Size2i RenderingDevice::vrs_get_texel_size() const {
 	return vrs_texel_size;
 }
 
+// Diagnostic descriptors use fixed field order and integer enum values from this engine revision.
+// Attachment/pass lists retain their index order; no resource handles enter the digest.
+static String _resource_trace_attachment_indices(const Vector<int32_t> &p_indices) {
+	String text = "[";
+	for (int i = 0; i < p_indices.size(); i++) {
+		if (i) {
+			text += ",";
+		}
+		text += itos(p_indices[i]);
+	}
+	return text + "]";
+}
+
+static String _resource_trace_framebuffer_format(const Vector<RD::AttachmentFormat> &p_attachments, const Vector<RD::FramebufferPass> &p_passes, uint32_t p_view_count, RD::VRSMethod p_vrs_method, int32_t p_vrs_attachment, const Size2i &p_vrs_texel_size, const Vector<RD::TextureSamples> &p_pass_samples) {
+	String text = vformat("{\"view_count\":%d,\"vrs_method\":%d,\"vrs_attachment\":%d,\"vrs_texel_size\":[%d,%d],\"attachments\":[", p_view_count, p_vrs_method, p_vrs_attachment, p_vrs_texel_size.x, p_vrs_texel_size.y);
+	for (int i = 0; i < p_attachments.size(); i++) {
+		if (i) {
+			text += ",";
+		}
+		const RD::AttachmentFormat &attachment = p_attachments[i];
+		text += vformat("{\"format\":%d,\"samples\":%d,\"usage_flags\":%d}", attachment.format, attachment.samples, attachment.usage_flags);
+	}
+	text += "],\"passes\":[";
+	for (int i = 0; i < p_passes.size(); i++) {
+		if (i) {
+			text += ",";
+		}
+		const RD::FramebufferPass &pass = p_passes[i];
+		text += "{\"color\":" + _resource_trace_attachment_indices(pass.color_attachments) +
+				",\"input\":" + _resource_trace_attachment_indices(pass.input_attachments) +
+				",\"resolve\":" + _resource_trace_attachment_indices(pass.resolve_attachments) +
+				",\"preserve\":" + _resource_trace_attachment_indices(pass.preserve_attachments) +
+				vformat(",\"depth\":%d,\"depth_resolve\":%d}", pass.depth_attachment, pass.depth_resolve_attachment);
+	}
+	text += "],\"pass_samples\":[";
+	for (int i = 0; i < p_pass_samples.size(); i++) {
+		if (i) {
+			text += ",";
+		}
+		text += itos(p_pass_samples[i]);
+	}
+	return text + "]}";
+}
+
 RenderingDevice::FramebufferFormatID RenderingDevice::framebuffer_format_create(const Vector<AttachmentFormat> &p_format, uint32_t p_view_count, int32_t p_fragment_density_map_attachment) {
 	FramebufferPass pass;
 	for (int i = 0; i < p_format.size(); i++) {
@@ -3626,6 +3670,10 @@ RenderingDevice::FramebufferFormatID RenderingDevice::framebuffer_format_create_
 	fb_format.pass_samples = samples;
 	fb_format.view_count = p_view_count;
 	framebuffer_formats[id] = fb_format;
+	if (ResourceTrace::enabled()) {
+		String description = _resource_trace_framebuffer_format(key.attachments, key.passes, key.view_count, key.vrs_method, key.vrs_attachment, key.vrs_texel_size, fb_format.pass_samples);
+		ResourceTrace::event("rd_framebuffer_format", ResourceTrace::field("rd_device_id", uitos(uint64_t(this))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(id))) + ResourceTrace::field("driver_render_pass_id", uitos(uint64_t(render_pass.id))) + ResourceTrace::descriptor_fields("rd-framebuffer-format-v1:descriptor-utf8", description));
+	}
 
 #if PRINT_FRAMEBUFFER_FORMAT
 	print_line("FRAMEBUFFER FORMAT:", id, "ATTACHMENTS:", p_attachments.size(), "PASSES:", p_passes.size());
@@ -3664,6 +3712,10 @@ RenderingDevice::FramebufferFormatID RenderingDevice::framebuffer_format_create_
 	fb_format.render_pass = render_pass;
 	fb_format.pass_samples.push_back(p_samples);
 	framebuffer_formats[id] = fb_format;
+	if (ResourceTrace::enabled()) {
+		String description = _resource_trace_framebuffer_format(key.attachments, key.passes, key.view_count, key.vrs_method, key.vrs_attachment, key.vrs_texel_size, fb_format.pass_samples);
+		ResourceTrace::event("rd_framebuffer_format", ResourceTrace::field("rd_device_id", uitos(uint64_t(this))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(id))) + ResourceTrace::field("driver_render_pass_id", uitos(uint64_t(render_pass.id))) + ResourceTrace::descriptor_fields("rd-framebuffer-format-v1:descriptor-utf8", description));
+	}
 
 #if PRINT_FRAMEBUFFER_FORMAT
 	print_line("FRAMEBUFFER FORMAT:", id, "ATTACHMENTS: EMPTY");
@@ -4014,6 +4066,23 @@ RenderingDevice::VertexFormatID RenderingDevice::vertex_format_create(const Vect
 	ce.vertex_formats = vertex_descriptions;
 	ce.bindings = std::move(bindings);
 	ce.driver_id = driver_id;
+	if (ResourceTrace::enabled()) {
+		struct AttributeLocationLess {
+			bool operator()(const VertexAttribute &p_a, const VertexAttribute &p_b) const { return p_a.location < p_b.location; }
+		};
+		Vector<VertexAttribute> attributes = ce.vertex_formats;
+		attributes.sort_custom<AttributeLocationLess>(); // Only the diagnostic copy is reordered.
+		String description = "{\"attributes\":[";
+		for (int i = 0; i < attributes.size(); i++) {
+			if (i) {
+				description += ",";
+			}
+			const VertexAttribute &attribute = attributes[i];
+			description += vformat("{\"location\":%d,\"binding\":%d,\"offset\":%d,\"format\":%d,\"stride\":%d,\"frequency\":%d}", attribute.location, attribute.binding, attribute.offset, attribute.format, attribute.stride, attribute.frequency);
+		}
+		description += "]}";
+		ResourceTrace::event("rd_vertex_format", ResourceTrace::field("rd_device_id", uitos(uint64_t(this))) + ResourceTrace::field("vertex_format_id", uitos(uint64_t(id))) + ResourceTrace::field("driver_vertex_format_id", uitos(uint64_t(driver_id.id))) + ResourceTrace::descriptor_fields("rd-vertex-format-v1:descriptor-utf8", description));
+	}
 	return id;
 }
 
@@ -5069,7 +5138,7 @@ RID RenderingDevice::render_pipeline_create(RID p_shader, FramebufferFormatID p_
 		}
 	}
 
-	RESOURCE_TRACE_SCOPE(trace_pipeline, "rd_render_pipeline", ResourceTrace::field("rd_shader_rid", uitos(uint64_t(p_shader.get_id()))) + ResourceTrace::field("driver_shader_id", uitos(uint64_t(shader->driver_id.id))) + ResourceTrace::field("vertex_format_id", uitos(uint64_t(p_vertex_format))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(p_framebuffer_format))) + ResourceTrace::field("render_pass", uitos(uint64_t(p_for_render_pass))));
+	RESOURCE_TRACE_SCOPE(trace_pipeline, "rd_render_pipeline", ResourceTrace::field("rd_device_id", uitos(uint64_t(this))) + ResourceTrace::field("rd_shader_rid", uitos(uint64_t(p_shader.get_id()))) + ResourceTrace::field("driver_shader_id", uitos(uint64_t(shader->driver_id.id))) + ResourceTrace::field("vertex_format_id", uitos(uint64_t(p_vertex_format))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(p_framebuffer_format))) + ResourceTrace::field("render_pass", uitos(uint64_t(p_for_render_pass))) + ResourceTrace::field("driver_vertex_format_id", uitos(uint64_t(driver_vertex_format.id))) + ResourceTrace::field("driver_render_pass_id", uitos(uint64_t(fb_format.render_pass.id))));
 	RenderPipeline pipeline;
 	pipeline.driver_id = driver->render_pipeline_create(
 			shader->driver_id,

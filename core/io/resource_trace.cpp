@@ -30,6 +30,7 @@
 
 #include "resource_trace.h"
 
+#include "core/crypto/crypto_core.h"
 #include "core/os/os.h"
 #include "core/os/thread.h"
 
@@ -121,6 +122,19 @@ bool enabled() {
 }
 String field(const char *p_key, const String &p_value) {
 	return String(",\"") + p_key + "\":\"" + p_value.json_escape() + "\"";
+}
+String bytes_fields(const char *p_domain, const uint8_t *p_data, size_t p_size) {
+	unsigned char digest[32];
+	Error error = CryptoCore::sha256(p_data, p_size, digest);
+	String fields = field("hash_domain", p_domain) + field("hash_bytes", uitos(p_size));
+	if (error != OK) {
+		return fields + field("sha256_error", itos(error));
+	}
+	return fields + field("sha256", String::hex_encode_buffer(digest, sizeof(digest)));
+}
+String descriptor_fields(const char *p_domain, const String &p_descriptor) {
+	CharString bytes = p_descriptor.utf8();
+	return field("descriptor", p_descriptor) + bytes_fields(p_domain, (const uint8_t *)bytes.get_data(), bytes.length());
 }
 void event(const char *p_stage, const String &p_fields) {
 	write("event", p_stage, 0, current_operation, p_fields);

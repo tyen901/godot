@@ -4153,6 +4153,14 @@
 				Using this can result in significant optimization, especially on lower-end devices. However, it comes at the cost of having to manage your viewports manually. For further optimization, see [method viewport_set_render_direct_to_screen].
 			</description>
 		</method>
+		<method name="viewport_cancel_pipeline_preparation">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="request_id" type="int" />
+			<description>
+				Clears the request-local results and marks the matching request cancelled. An older request ID cannot cancel a newer request. No shaders, resources, or native pipeline tasks are removed; their normal engine owners retain responsibility for their lifetime.
+			</description>
+		</method>
 		<method name="viewport_create">
 			<return type="RID" />
 			<description>
@@ -4176,6 +4184,15 @@
 				Returns the GPU time taken to render the last frame in milliseconds. To get a complete readout of GPU time spent to render the scene, sum the render times of all viewports that are drawn every frame. Unlike [method Engine.get_frames_per_second], this method accurately reflects GPU utilization even if framerate is capped via V-Sync or [member Engine.max_fps]. See also [method viewport_get_measured_render_time_cpu].
 				[b]Note:[/b] Requires measurements to be enabled on the specified [param viewport] using [method viewport_set_measure_render_time]. Otherwise, this method returns [code]0.0[/code].
 				[b]Note:[/b] When GPU utilization is low enough during a certain period of time, GPUs will decrease their power state (which in turn decreases core and memory clock speeds). This can cause the reported GPU time to increase if GPU utilization is kept low enough by a framerate cap (compared to what it would be at the GPU's highest power state). Keep this in mind when benchmarking using [method viewport_get_measured_render_time_gpu]. This behavior can be overridden in the graphics driver settings at the cost of higher power usage.
+			</description>
+		</method>
+		<method name="viewport_get_pipeline_preparation_status" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="viewport" type="RID" />
+			<description>
+				Returns the current [code]request_id[/code], [code]state[/code], [code]frame[/code], [code]pipeline_binds[/code], [code]failed_pipelines[/code], [code]draw_calls[/code], and [code]pass_mask[/code]. States are [code]none[/code], [code]pending[/code], [code]drawn[/code], [code]failed[/code], [code]cancelled[/code], and [code]unsupported[/code].
+				[code]drawn[/code] requires valid optimized pipelines, at least one recorded geometry draw, and completion of native scene draw-command recording. It does not certify queue submission, GPU completion, presentation, all source content, canvas/effect pipelines, reflection-probe updates, or passes which did not execute. Counters are request-local bind/draw counts, not unique pipeline inventories or global readiness counts. Mobile pass bits are color (0), transparent color (1), shadow (2), dual-paraboloid shadow (3), depth material (4), and motion vectors (5).
+				Resizing or reconfiguring render buffers, changing the camera or scenario, deactivating the viewport, disabling 3D or updates, and explicit cancellation invalidate the result. A viewport that is not drawn can remain pending; no timeout is used as a readiness signal. Freeing the viewport releases all request state.
 			</description>
 		</method>
 		<method name="viewport_get_render_info">
@@ -4228,6 +4245,14 @@
 			<param index="1" name="canvas" type="RID" />
 			<description>
 				Detaches a viewport from a canvas.
+			</description>
+		</method>
+		<method name="viewport_request_pipeline_preparation">
+			<return type="int" />
+			<param index="0" name="viewport" type="RID" />
+			<description>
+				Requests optimized geometry pipelines for the next actual 3D draw of [param viewport] and returns its request ID. A new request replaces the previous result. Only single-view Mobile rendering without XR is supported. Requests from inside an active preparation rendering callback are rejected with ID [code]0[/code]. This does not create a scene, change visibility, schedule a hidden viewport, or prepare future camera views.
+				The actual draw uses its native surface, framebuffer, pass, and specialization keys, waits for each required pipeline, and reports invalid pipelines. Poll [method viewport_get_pipeline_preparation_status] after [signal frame_post_draw]. A completed draw is not device completion; retrieve the viewport texture's image to complete native readback before revealing a prepared view.
 			</description>
 		</method>
 		<method name="viewport_set_active">

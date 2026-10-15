@@ -770,6 +770,10 @@ public:
 	FUNC1RC(RID, viewport_get_render_target, RID)
 	FUNC1RC(RID, viewport_get_texture, RID)
 
+	FUNC1R(uint64_t, viewport_request_pipeline_preparation, RID)
+	FUNC1RC(Dictionary, viewport_get_pipeline_preparation_status, RID)
+	FUNC2(viewport_cancel_pipeline_preparation, RID, uint64_t)
+
 	FUNC2(viewport_set_disable_2d, RID, bool)
 	FUNC2(viewport_set_environment_mode, RID, RSE::ViewportEnvironmentMode)
 	FUNC2(viewport_set_disable_3d, RID, bool)

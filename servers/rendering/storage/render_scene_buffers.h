@@ -100,10 +100,68 @@ public:
 class RenderSceneBuffers : public RefCounted {
 	GDCLASS(RenderSceneBuffers, RefCounted);
 
+public:
+	// One viewport draw only. No resources or pipeline keys are retained here.
+	struct PipelinePreparation {
+		enum State {
+			NONE,
+			PENDING,
+			DRAWN,
+			FAILED,
+			CANCELLED,
+			UNSUPPORTED,
+		};
+		uint64_t request_id = 0;
+		uint64_t viewport_id = 0;
+		uint64_t frame = 0;
+		uint64_t pipeline_binds = 0;
+		uint64_t failed_pipelines = 0;
+		uint64_t draw_calls = 0;
+		uint32_t pass_mask = 0;
+		State state = NONE;
+		bool renderer_supported = false;
+		bool render_completed = false;
+
+		void request() {
+			uint64_t next_id = request_id + 1;
+			*this = {};
+			request_id = next_id;
+			state = PENDING;
+		}
+		void cancel() {
+			if (state != NONE) {
+				uint64_t previous_id = request_id;
+				*this = {};
+				request_id = previous_id;
+				state = CANCELLED;
+			}
+		}
+		void finish() {
+			if (state != PENDING) {
+				if (state == CANCELLED) {
+					cancel();
+				}
+				return;
+			}
+			if (!renderer_supported) {
+				state = UNSUPPORTED;
+			} else {
+				state = render_completed && failed_pipelines == 0 && pipeline_binds > 0 && draw_calls > 0 ? DRAWN : FAILED;
+			}
+		}
+	};
+
+private:
+	PipelinePreparation *pipeline_preparation = nullptr;
+
 protected:
 	static void _bind_methods();
 
 public:
+	// Set and cleared by RendererViewport on the rendering thread around render_camera.
+	void set_pipeline_preparation(PipelinePreparation *p_preparation) { pipeline_preparation = p_preparation; }
+	PipelinePreparation *get_pipeline_preparation() const { return pipeline_preparation; }
+
 	RenderSceneBuffers() {}
 	virtual ~RenderSceneBuffers() {}
 

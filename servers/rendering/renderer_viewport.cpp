@@ -32,6 +32,7 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/io/resource_trace.h"
 #include "core/math/transform_interpolator.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
@@ -133,7 +134,10 @@ Vector<RendererViewport::Viewport *> RendererViewport::_sort_active_viewports() 
 	return result;
 }
 
-void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
+void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport, bool p_cancel_preparation) {
+	if (p_cancel_preparation) {
+		p_viewport->pipeline_preparation.cancel();
+	}
 	if (p_viewport->render_buffers.is_valid()) {
 		if (p_viewport->size.width == 0 || p_viewport->size.height == 0) {
 			p_viewport->render_buffers.unref();
@@ -332,7 +336,21 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 	}
 
 	float screen_mesh_lod_threshold = p_viewport->mesh_lod_threshold / float(p_viewport->size.width);
-	RSG::scene->render_camera(p_viewport->render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, p_viewport->jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, p_viewport->window_output_max_value, &p_viewport->render_info);
+	Ref<RenderSceneBuffers> render_buffers = p_viewport->render_buffers;
+	RenderSceneBuffers::PipelinePreparation *preparation = p_viewport->pipeline_preparation.state == RenderSceneBuffers::PipelinePreparation::PENDING ? &p_viewport->pipeline_preparation : nullptr;
+	if (preparation != nullptr) {
+		p_viewport->pipeline_preparation_active = true;
+		preparation->frame = draw_viewports_pass;
+		render_buffers->set_pipeline_preparation(preparation);
+		RESOURCE_TRACE_EVENT("viewport_preparation_begin", ResourceTrace::field("viewport_rid", uitos(p_viewport->self.get_id())) + ResourceTrace::field("request_id", uitos(preparation->request_id)) + ResourceTrace::field("frame", uitos(preparation->frame)) + ResourceTrace::field("camera_rid", uitos(p_viewport->camera.get_id())) + ResourceTrace::field("scenario_rid", uitos(p_viewport->scenario.get_id())));
+	}
+	RSG::scene->render_camera(render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, p_viewport->jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, p_viewport->window_output_max_value, &p_viewport->render_info);
+	if (preparation != nullptr) {
+		render_buffers->set_pipeline_preparation(nullptr);
+		p_viewport->pipeline_preparation_active = false;
+		preparation->finish();
+		RESOURCE_TRACE_EVENT("viewport_preparation_end", ResourceTrace::field("viewport_rid", uitos(p_viewport->self.get_id())) + ResourceTrace::field("request_id", uitos(preparation->request_id)) + ResourceTrace::field("frame", uitos(preparation->frame)) + ResourceTrace::field("state", uitos(preparation->state)) + ResourceTrace::field("pipeline_binds", uitos(preparation->pipeline_binds)) + ResourceTrace::field("failed_pipelines", uitos(preparation->failed_pipelines)) + ResourceTrace::field("draw_calls", uitos(preparation->draw_calls)) + ResourceTrace::field("pass_mask", uitos(preparation->pass_mask)));
+	}
 
 	RENDER_TIMESTAMP("< Render 3D Scene");
 #endif // _3D_DISABLED
@@ -393,7 +411,7 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 		//wants to draw 3D but there is no render buffer, create
 		p_viewport->render_buffers = RSG::scene->render_buffers_create();
 
-		_configure_3d_render_buffers(p_viewport);
+		_configure_3d_render_buffers(p_viewport, false);
 	}
 
 	Color bgcolor = p_viewport->transparent_bg ? Color(0, 0, 0, 0) : RSG::texture_storage->get_default_clear_color();
@@ -989,6 +1007,44 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 	}
 }
 
+uint64_t RendererViewport::viewport_request_pipeline_preparation(RID p_viewport) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL_V(viewport, 0);
+	ERR_FAIL_COND_V_MSG(viewport->pipeline_preparation_active, 0, "Cannot replace an active preparation from a rendering callback.");
+	viewport->pipeline_preparation.request();
+	viewport->pipeline_preparation.viewport_id = p_viewport.get_id();
+	if (OS::get_singleton()->get_current_rendering_method() != "mobile" || viewport->use_xr || viewport->view_count != 1) {
+		viewport->pipeline_preparation.state = RenderSceneBuffers::PipelinePreparation::UNSUPPORTED;
+	} else if (!active_viewports.has(viewport) || viewport->update_mode == RSE::VIEWPORT_UPDATE_DISABLED || viewport->disable_3d || viewport->size.width == 0 || viewport->size.height == 0 || !RSG::scene->is_camera(viewport->camera) || viewport->scenario.is_null()) {
+		viewport->pipeline_preparation.state = RenderSceneBuffers::PipelinePreparation::FAILED;
+	}
+	return viewport->pipeline_preparation.request_id;
+}
+
+Dictionary RendererViewport::viewport_get_pipeline_preparation_status(RID p_viewport) const {
+	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL_V(viewport, Dictionary());
+	const RenderSceneBuffers::PipelinePreparation &preparation = viewport->pipeline_preparation;
+	static const char *states[] = { "none", "pending", "drawn", "failed", "cancelled", "unsupported" };
+	Dictionary result;
+	result["request_id"] = preparation.request_id;
+	result["state"] = states[preparation.state];
+	result["frame"] = preparation.frame;
+	result["pipeline_binds"] = preparation.pipeline_binds;
+	result["failed_pipelines"] = preparation.failed_pipelines;
+	result["draw_calls"] = preparation.draw_calls;
+	result["pass_mask"] = preparation.pass_mask;
+	return result;
+}
+
+void RendererViewport::viewport_cancel_pipeline_preparation(RID p_viewport, uint64_t p_request_id) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	if (viewport->pipeline_preparation.request_id == p_request_id) {
+		viewport->pipeline_preparation.cancel();
+	}
+}
+
 RID RendererViewport::viewport_allocate() {
 	return viewport_owner.allocate_rid();
 }
@@ -1013,6 +1069,7 @@ void RendererViewport::viewport_set_use_xr(RID p_viewport, bool p_use_xr) {
 		return;
 	}
 
+	viewport->pipeline_preparation.cancel();
 	viewport->use_xr = p_use_xr;
 
 	// Re-configure the 3D render buffers when disabling XR. They'll get
@@ -1138,6 +1195,7 @@ void RendererViewport::viewport_set_active(RID p_viewport, bool p_active) {
 		viewport->occlusion_buffer_dirty = true;
 		active_viewports.push_back(viewport);
 	} else {
+		viewport->pipeline_preparation.cancel();
 		active_viewports.erase(viewport);
 	}
 
@@ -1213,6 +1271,9 @@ void RendererViewport::viewport_set_update_mode(RID p_viewport, RSE::ViewportUpd
 	ERR_FAIL_NULL(viewport);
 
 	viewport->update_mode = p_mode;
+	if (p_mode == RSE::VIEWPORT_UPDATE_DISABLED) {
+		viewport->pipeline_preparation.cancel();
+	}
 }
 
 RSE::ViewportUpdateMode RendererViewport::viewport_get_update_mode(RID p_viewport) const {
@@ -1290,6 +1351,9 @@ void RendererViewport::viewport_set_disable_3d(RID p_viewport, bool p_disable) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
 
+	if (viewport->disable_3d != p_disable) {
+		viewport->pipeline_preparation.cancel();
+	}
 	viewport->disable_3d = p_disable;
 }
 
@@ -1297,6 +1361,9 @@ void RendererViewport::viewport_attach_camera(RID p_viewport, RID p_camera) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
 
+	if (viewport->camera != p_camera) {
+		viewport->pipeline_preparation.cancel();
+	}
 	viewport->camera = p_camera;
 }
 
@@ -1308,6 +1375,9 @@ void RendererViewport::viewport_set_scenario(RID p_viewport, RID p_scenario) {
 		RSG::scene->scenario_remove_viewport_visibility_mask(viewport->scenario, p_viewport);
 	}
 
+	if (viewport->scenario != p_scenario) {
+		viewport->pipeline_preparation.cancel();
+	}
 	viewport->scenario = p_scenario;
 	if (viewport->use_occlusion_culling) {
 		RendererSceneOcclusionCull::get_singleton()->buffer_set_scenario(p_viewport, p_scenario);
@@ -1680,6 +1750,7 @@ bool RendererViewport::free(RID p_rid) {
 		}
 
 		viewport_set_scenario(p_rid, RID());
+		viewport->pipeline_preparation.cancel();
 		active_viewports.erase(viewport);
 		sorted_active_viewports_dirty = true;
 

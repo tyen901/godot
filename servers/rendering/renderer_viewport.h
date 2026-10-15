@@ -66,6 +66,8 @@ public:
 		RID render_target;
 		RID render_target_texture;
 		Ref<RenderSceneBuffers> render_buffers;
+		RenderSceneBuffers::PipelinePreparation pipeline_preparation;
+		bool pipeline_preparation_active = false;
 
 		RSE::ViewportMSAA msaa_2d = RSE::VIEWPORT_MSAA_DISABLED;
 		RSE::ViewportMSAA msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
@@ -207,7 +209,7 @@ private:
 	void _viewport_set_size(Viewport *p_viewport, int p_width, int p_height, uint32_t p_view_count);
 	bool _viewport_requires_motion_vectors(Viewport *p_viewport);
 	void _viewport_set_force_motion_vectors(Viewport *p_viewport, bool p_force_motion_vectors);
-	void _configure_3d_render_buffers(Viewport *p_viewport);
+	void _configure_3d_render_buffers(Viewport *p_viewport, bool p_cancel_preparation = true);
 	void _draw_3d(Viewport *p_viewport);
 	void _draw_viewport(Viewport *p_viewport);
 	DisplayServerEnums::WindowID _get_containing_window(Viewport *p_viewport);
@@ -246,6 +248,10 @@ public:
 
 	RID viewport_get_render_target(RID p_viewport) const;
 	RID viewport_get_texture(RID p_viewport) const;
+
+	uint64_t viewport_request_pipeline_preparation(RID p_viewport);
+	Dictionary viewport_get_pipeline_preparation_status(RID p_viewport) const;
+	void viewport_cancel_pipeline_preparation(RID p_viewport, uint64_t p_request_id);
 	RID viewport_get_occluder_debug_texture(RID p_viewport) const;
 
 	void viewport_set_prev_camera_data(RID p_viewport, const RendererSceneRender::CameraData *p_camera_data);

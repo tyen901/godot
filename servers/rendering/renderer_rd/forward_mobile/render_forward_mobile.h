@@ -74,6 +74,7 @@ private:
 
 	SceneShaderForwardMobile scene_shader;
 	bool disable_ubershaders = false;
+	RenderSceneBuffers::PipelinePreparation *pipeline_preparation = nullptr;
 
 	/* Render Buffer */
 

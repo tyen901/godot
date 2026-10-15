@@ -576,6 +576,10 @@ public:
 	virtual RID viewport_get_render_target(RID p_viewport) const = 0;
 	virtual RID viewport_get_texture(RID p_viewport) const = 0;
 
+	virtual uint64_t viewport_request_pipeline_preparation(RID p_viewport) = 0;
+	virtual Dictionary viewport_get_pipeline_preparation_status(RID p_viewport) const = 0;
+	virtual void viewport_cancel_pipeline_preparation(RID p_viewport, uint64_t p_request_id) = 0;
+
 	virtual void viewport_set_environment_mode(RID p_viewport, RSE::ViewportEnvironmentMode p_mode) = 0;
 	virtual void viewport_set_disable_3d(RID p_viewport, bool p_disable) = 0;
 	virtual void viewport_set_disable_2d(RID p_viewport, bool p_disable) = 0;

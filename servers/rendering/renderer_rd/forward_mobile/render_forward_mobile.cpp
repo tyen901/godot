@@ -31,6 +31,7 @@
 #include "render_forward_mobile.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/resource_trace.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
@@ -866,6 +867,17 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 		// This will not be available when rendering reflection probes.
 		rb_data = rb->get_custom_data(RB_SCOPE_MOBILE);
 	}
+	// All render lists executed by this scene invocation use their normal draw
+	// keys. Restore the pointer on early returns and nested render invocations.
+	struct PreparationScope {
+		RenderSceneBuffers::PipelinePreparation *&current;
+		RenderSceneBuffers::PipelinePreparation *previous;
+		~PreparationScope() { current = previous; }
+	} preparation_scope{ pipeline_preparation, pipeline_preparation };
+	pipeline_preparation = rb->get_pipeline_preparation();
+	if (pipeline_preparation != nullptr) {
+		pipeline_preparation->renderer_supported = true;
+	}
 	bool is_reflection_probe = p_render_data->reflection_probe.is_valid();
 	bool is_multiview = rb->get_view_count() > 1;
 
@@ -1430,6 +1442,9 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	}
 
 	_render_buffers_debug_draw(p_render_data);
+	if (pipeline_preparation != nullptr) {
+		pipeline_preparation->render_completed = true;
+	}
 }
 
 /* these are being called from RendererSceneRenderRD::_pre_opaque_render */
@@ -2552,6 +2567,9 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 		}
 
 		if (!mesh_surface) {
+			if (pipeline_preparation != nullptr) {
+				pipeline_preparation->failed_pipelines++;
+			}
 			continue;
 		}
 
@@ -2613,7 +2631,7 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 		RID pipeline_rd;
 		RID vertex_array_rd;
 		RID index_array_rd;
-		uint32_t ubershader_iterations = (disable_ubershaders ? 1 : 2);
+		uint32_t ubershader_iterations = ((disable_ubershaders || pipeline_preparation != nullptr) ? 1 : 2);
 		bool pipeline_valid = false;
 		while (pipeline_key.ubershader < ubershader_iterations) {
 			// Skeleton and blend shape.
@@ -2638,7 +2656,23 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 
 			if (shader != prev_shader || pipeline_hash != prev_pipeline_hash) {
 				RSE::PipelineSource pipeline_source = pipeline_key.ubershader ? RSE::PIPELINE_SOURCE_DRAW : RSE::PIPELINE_SOURCE_SPECIALIZATION;
+				if (pipeline_preparation != nullptr) {
+					// Join an existing task before get_pipeline imports published results
+					// and retires their task IDs. Newly requested tasks use its wait path.
+					shader->pipeline_hash_map.wait_for_pipeline(pipeline_hash);
+				}
 				pipeline_rd = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_hash, pipeline_key.ubershader == (ubershader_iterations - 1), pipeline_source);
+				if (pipeline_preparation != nullptr) {
+					pipeline_preparation->pipeline_binds++;
+					pipeline_preparation->pass_mask |= 1u << p_pass_mode;
+					if (pipeline_rd.is_valid() && !RD::get_singleton()->render_pipeline_is_valid(pipeline_rd)) {
+						pipeline_rd = RID();
+					}
+					if (pipeline_rd.is_null()) {
+						pipeline_preparation->failed_pipelines++;
+					}
+					RESOURCE_TRACE_EVENT("viewport_preparation_pipeline", ResourceTrace::field("viewport_rid", uitos(pipeline_preparation->viewport_id)) + ResourceTrace::field("request_id", uitos(pipeline_preparation->request_id)) + ResourceTrace::field("frame", uitos(pipeline_preparation->frame)) + ResourceTrace::field("shader_data_ptr", uitos(uint64_t(shader))) + ResourceTrace::field("version_rid", uitos(shader->version.get_id())) + ResourceTrace::field("path", shader->path) + ResourceTrace::field("key_hash", uitos(pipeline_hash)) + ResourceTrace::field("pass_mode", uitos(p_pass_mode)) + ResourceTrace::field("vertex_format_id", uitos(uint64_t(pipeline_key.vertex_format_id))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(pipeline_key.framebuffer_format_id))) + ResourceTrace::field("cull_mode", uitos(uint64_t(pipeline_key.cull_mode))) + ResourceTrace::field("primitive_type", uitos(uint64_t(pipeline_key.primitive_type))) + ResourceTrace::field("version", uitos(uint64_t(pipeline_key.version))) + ResourceTrace::field("render_pass", uitos(uint64_t(pipeline_key.render_pass))) + ResourceTrace::field("wireframe", uitos(uint64_t(pipeline_key.wireframe))) + ResourceTrace::field("ubershader", uitos(uint64_t(pipeline_key.ubershader))) + ResourceTrace::field("packed_0", uitos(uint64_t(pipeline_key.shader_specialization.packed_0))) + ResourceTrace::field("packed_1", uitos(uint64_t(pipeline_key.shader_specialization.packed_1))) + ResourceTrace::field("packed_2", uitos(uint64_t(pipeline_key.shader_specialization.packed_2))) + ResourceTrace::field("pipeline_rid", uitos(pipeline_rd.get_id())) + ResourceTrace::field("valid", pipeline_rd.is_valid() ? "true" : "false"));
+				}
 
 				if (pipeline_rd.is_valid()) {
 					pipeline_valid = true;
@@ -2736,6 +2770,9 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
 			} else {
 				RD::get_singleton()->draw_list_draw(draw_list, index_array_rd.is_valid(), instance_count);
+			}
+			if (pipeline_preparation != nullptr) {
+				pipeline_preparation->draw_calls++;
 			}
 		}
 	}

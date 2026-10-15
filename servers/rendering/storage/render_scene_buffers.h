@@ -111,6 +111,25 @@ public:
 			CANCELLED,
 			UNSUPPORTED,
 		};
+		enum PipelinePolicy {
+			POLICY_UNSET,
+			POLICY_OPTIMIZED,
+			POLICY_UBERSHADER_ONLY,
+			POLICY_UNAVAILABLE,
+		};
+		PipelinePolicy pipeline_policy = POLICY_UNSET;
+		const char *get_pipeline_policy_name() const {
+			switch (pipeline_policy) {
+				case POLICY_OPTIMIZED:
+					return "optimized";
+				case POLICY_UBERSHADER_ONLY:
+					return "ubershader_only";
+				case POLICY_UNAVAILABLE:
+					return "unavailable";
+				default:
+					return "unset";
+			}
+		}
 		uint64_t request_id = 0;
 		uint64_t viewport_id = 0;
 		uint64_t frame = 0;

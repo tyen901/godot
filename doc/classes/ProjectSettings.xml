@@ -3330,6 +3330,10 @@
 		<member name="rendering/reflections/specular_occlusion/enabled" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], reduces reflections based on ambient light.
 		</member>
+		<member name="rendering/renderer/mobile_ubershader_only" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], the Mobile renderer uses its native ubershader pipelines for scene draws and view preparation, without requesting optimized scene pipelines. Lights, materials, shadows, and culling keep their native semantics. This can trade rendering performance for reduced pipeline specialization work; it does not guarantee lower compilation time or memory use.
+			If the rendering driver disables ubershaders, scene draws and requested view preparation fail rather than selecting optimized pipelines. This setting requires a restart and has no effect in other rendering methods.
+		</member>
 		<member name="rendering/renderer/rendering_method" type="String" setter="" getter="" default="&quot;forward_plus&quot;">
 			Sets the renderer that will be used by the project. Options are:
 			[b]forward_plus[/b] (Forward+): High-end renderer designed for desktop devices. Has a higher base overhead, but scales well with complex scenes. Not suitable for older devices or mobile.

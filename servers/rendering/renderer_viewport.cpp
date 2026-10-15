@@ -349,7 +349,7 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 		render_buffers->set_pipeline_preparation(nullptr);
 		p_viewport->pipeline_preparation_active = false;
 		preparation->finish();
-		RESOURCE_TRACE_EVENT("viewport_preparation_end", ResourceTrace::field("viewport_rid", uitos(p_viewport->self.get_id())) + ResourceTrace::field("request_id", uitos(preparation->request_id)) + ResourceTrace::field("frame", uitos(preparation->frame)) + ResourceTrace::field("state", uitos(preparation->state)) + ResourceTrace::field("pipeline_binds", uitos(preparation->pipeline_binds)) + ResourceTrace::field("failed_pipelines", uitos(preparation->failed_pipelines)) + ResourceTrace::field("draw_calls", uitos(preparation->draw_calls)) + ResourceTrace::field("pass_mask", uitos(preparation->pass_mask)));
+		RESOURCE_TRACE_EVENT("viewport_preparation_end", ResourceTrace::field("viewport_rid", uitos(p_viewport->self.get_id())) + ResourceTrace::field("request_id", uitos(preparation->request_id)) + ResourceTrace::field("frame", uitos(preparation->frame)) + ResourceTrace::field("state", uitos(preparation->state)) + ResourceTrace::field("pipeline_policy", preparation->get_pipeline_policy_name()) + ResourceTrace::field("pipeline_binds", uitos(preparation->pipeline_binds)) + ResourceTrace::field("failed_pipelines", uitos(preparation->failed_pipelines)) + ResourceTrace::field("draw_calls", uitos(preparation->draw_calls)) + ResourceTrace::field("pass_mask", uitos(preparation->pass_mask)));
 	}
 
 	RENDER_TIMESTAMP("< Render 3D Scene");
@@ -1029,6 +1029,7 @@ Dictionary RendererViewport::viewport_get_pipeline_preparation_status(RID p_view
 	Dictionary result;
 	result["request_id"] = preparation.request_id;
 	result["state"] = states[preparation.state];
+	result["pipeline_policy"] = preparation.get_pipeline_policy_name();
 	result["frame"] = preparation.frame;
 	result["pipeline_binds"] = preparation.pipeline_binds;
 	result["failed_pipelines"] = preparation.failed_pipelines;

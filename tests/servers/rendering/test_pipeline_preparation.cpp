@@ -73,8 +73,10 @@ TEST_CASE("[Rendering][PipelinePreparation] Valid pipelines require a completed 
 	preparation.pipeline_binds = 2;
 	preparation.draw_calls = 3;
 	preparation.render_completed = true;
+	preparation.pipeline_policy = Preparation::POLICY_UBERSHADER_ONLY;
 	preparation.finish();
 	CHECK(preparation.state == Preparation::DRAWN);
+	CHECK(preparation.pipeline_policy == Preparation::POLICY_UBERSHADER_ONLY);
 }
 
 TEST_CASE("[Rendering][PipelinePreparation] Cancellation and reuse retain no draw state") {
@@ -83,12 +85,14 @@ TEST_CASE("[Rendering][PipelinePreparation] Cancellation and reuse retain no dra
 	preparation.frame = 7;
 	preparation.pipeline_binds = 2;
 	preparation.pass_mask = 3;
+	preparation.pipeline_policy = Preparation::POLICY_UBERSHADER_ONLY;
 	preparation.cancel();
 	CHECK(preparation.state == Preparation::CANCELLED);
 	CHECK(preparation.request_id == 1);
 	CHECK(preparation.frame == 0);
 	CHECK(preparation.pipeline_binds == 0);
 	CHECK(preparation.pass_mask == 0);
+	CHECK(preparation.pipeline_policy == Preparation::POLICY_UNSET);
 	// A rendering callback can cancel while the current draw is finishing.
 	preparation.render_completed = true;
 	preparation.draw_calls = 1;

@@ -4190,8 +4190,9 @@
 			<return type="Dictionary" />
 			<param index="0" name="viewport" type="RID" />
 			<description>
-				Returns the current [code]request_id[/code], [code]state[/code], [code]frame[/code], [code]pipeline_binds[/code], [code]failed_pipelines[/code], [code]draw_calls[/code], and [code]pass_mask[/code]. States are [code]none[/code], [code]pending[/code], [code]drawn[/code], [code]failed[/code], [code]cancelled[/code], and [code]unsupported[/code].
-				[code]drawn[/code] requires valid optimized pipelines, at least one recorded geometry draw, and completion of native scene draw-command recording. It does not certify queue submission, GPU completion, presentation, all source content, canvas/effect pipelines, reflection-probe updates, or passes which did not execute. Counters are request-local bind/draw counts, not unique pipeline inventories or global readiness counts. Mobile pass bits are color (0), transparent color (1), shadow (2), dual-paraboloid shadow (3), depth material (4), and motion vectors (5).
+				Returns the current [code]request_id[/code], [code]state[/code], [code]pipeline_policy[/code], [code]frame[/code], [code]pipeline_binds[/code], [code]failed_pipelines[/code], [code]draw_calls[/code], and [code]pass_mask[/code]. States are [code]none[/code], [code]pending[/code], [code]drawn[/code], [code]failed[/code], [code]cancelled[/code], and [code]unsupported[/code].
+				[code]pipeline_policy[/code] reports [code]unset[/code] before a draw or after invalidation, [code]optimized[/code], [code]ubershader_only[/code], or [code]unavailable[/code] when the requested ubershaders are disabled by the driver.
+				[code]drawn[/code] requires valid pipelines for the selected native policy, at least one recorded geometry draw, and completion of native scene draw-command recording. It does not certify queue submission, GPU completion, presentation, all source content, canvas/effect pipelines, reflection-probe updates, or passes which did not execute. Counters are request-local bind/draw counts, not unique pipeline inventories or global readiness counts. Mobile pass bits are color (0), transparent color (1), shadow (2), dual-paraboloid shadow (3), depth material (4), and motion vectors (5).
 				Resizing or reconfiguring render buffers, changing the camera or scenario, deactivating the viewport, disabling 3D or updates, and explicit cancellation invalidate the result. A viewport that is not drawn can remain pending; no timeout is used as a readiness signal. Freeing the viewport releases all request state.
 			</description>
 		</method>
@@ -4251,8 +4252,8 @@
 			<return type="int" />
 			<param index="0" name="viewport" type="RID" />
 			<description>
-				Requests optimized geometry pipelines for the next actual 3D draw of [param viewport] and returns its request ID. A new request replaces the previous result. Only single-view Mobile rendering without XR is supported. Requests from inside an active preparation rendering callback are rejected with ID [code]0[/code]. This does not create a scene, change visibility, schedule a hidden viewport, or prepare future camera views.
-				The actual draw uses its native surface, framebuffer, pass, and specialization keys, waits for each required pipeline, and reports invalid pipelines. Poll [method viewport_get_pipeline_preparation_status] after [signal frame_post_draw]. A completed draw is not device completion; retrieve the viewport texture's image to complete native readback before revealing a prepared view.
+				Requests geometry pipelines for the selected native policy for the next actual 3D draw of [param viewport] and returns its request ID. A new request replaces the previous result. Only single-view Mobile rendering without XR is supported. Requests from inside an active preparation rendering callback are rejected with ID [code]0[/code]. This does not create a scene, change visibility, schedule a hidden viewport, or prepare future camera views.
+				The selected policy is controlled by [member ProjectSettings.rendering/renderer/mobile_ubershader_only]. The actual draw uses its native surface, framebuffer, pass, and specialization keys, waits for each required pipeline, and reports invalid pipelines. Poll [method viewport_get_pipeline_preparation_status] after [signal frame_post_draw]. A completed draw is not device completion; retrieve the viewport texture's image to complete native readback before revealing a prepared view.
 			</description>
 		</method>
 		<method name="viewport_set_active">

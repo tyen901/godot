@@ -877,6 +877,11 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	pipeline_preparation = rb->get_pipeline_preparation();
 	if (pipeline_preparation != nullptr) {
 		pipeline_preparation->renderer_supported = true;
+		pipeline_preparation->pipeline_policy = ubershader_only ? RenderSceneBuffers::PipelinePreparation::POLICY_UBERSHADER_ONLY : RenderSceneBuffers::PipelinePreparation::POLICY_OPTIMIZED;
+		if (ubershader_only && disable_ubershaders) {
+			pipeline_preparation->pipeline_policy = RenderSceneBuffers::PipelinePreparation::POLICY_UNAVAILABLE;
+			pipeline_preparation->failed_pipelines++;
+		}
 	}
 	bool is_reflection_probe = p_render_data->reflection_probe.is_valid();
 	bool is_multiview = rb->get_view_count() > 1;
@@ -2622,7 +2627,7 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 		pipeline_key.framebuffer_format_id = framebuffer_format;
 		pipeline_key.wireframe = p_params->force_wireframe;
 		pipeline_key.render_pass = p_params->subpass;
-		pipeline_key.ubershader = 0;
+		pipeline_key.ubershader = ubershader_only ? 1 : 0;
 
 		bool emulate_point_size = shader->uses_point_size && scene_shader.emulate_point_size;
 
@@ -2631,7 +2636,8 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 		RID pipeline_rd;
 		RID vertex_array_rd;
 		RID index_array_rd;
-		uint32_t ubershader_iterations = ((disable_ubershaders || pipeline_preparation != nullptr) ? 1 : 2);
+		// The selected policy owns preparation too; key1 must never enqueue key0.
+		uint32_t ubershader_iterations = ubershader_only ? (disable_ubershaders ? 0 : 2) : ((disable_ubershaders || pipeline_preparation != nullptr) ? 1 : 2);
 		bool pipeline_valid = false;
 		while (pipeline_key.ubershader < ubershader_iterations) {
 			// Skeleton and blend shape.
@@ -2671,7 +2677,7 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 					if (pipeline_rd.is_null()) {
 						pipeline_preparation->failed_pipelines++;
 					}
-					RESOURCE_TRACE_EVENT("viewport_preparation_pipeline", ResourceTrace::field("viewport_rid", uitos(pipeline_preparation->viewport_id)) + ResourceTrace::field("request_id", uitos(pipeline_preparation->request_id)) + ResourceTrace::field("frame", uitos(pipeline_preparation->frame)) + ResourceTrace::field("shader_data_ptr", uitos(uint64_t(shader))) + ResourceTrace::field("version_rid", uitos(shader->version.get_id())) + ResourceTrace::field("path", shader->path) + ResourceTrace::field("key_hash", uitos(pipeline_hash)) + ResourceTrace::field("pass_mode", uitos(p_pass_mode)) + ResourceTrace::field("vertex_format_id", uitos(uint64_t(pipeline_key.vertex_format_id))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(pipeline_key.framebuffer_format_id))) + ResourceTrace::field("cull_mode", uitos(uint64_t(pipeline_key.cull_mode))) + ResourceTrace::field("primitive_type", uitos(uint64_t(pipeline_key.primitive_type))) + ResourceTrace::field("version", uitos(uint64_t(pipeline_key.version))) + ResourceTrace::field("render_pass", uitos(uint64_t(pipeline_key.render_pass))) + ResourceTrace::field("wireframe", uitos(uint64_t(pipeline_key.wireframe))) + ResourceTrace::field("ubershader", uitos(uint64_t(pipeline_key.ubershader))) + ResourceTrace::field("packed_0", uitos(uint64_t(pipeline_key.shader_specialization.packed_0))) + ResourceTrace::field("packed_1", uitos(uint64_t(pipeline_key.shader_specialization.packed_1))) + ResourceTrace::field("packed_2", uitos(uint64_t(pipeline_key.shader_specialization.packed_2))) + ResourceTrace::field("pipeline_rid", uitos(pipeline_rd.get_id())) + ResourceTrace::field("valid", pipeline_rd.is_valid() ? "true" : "false"));
+					RESOURCE_TRACE_EVENT("viewport_preparation_pipeline", ResourceTrace::field("viewport_rid", uitos(pipeline_preparation->viewport_id)) + ResourceTrace::field("request_id", uitos(pipeline_preparation->request_id)) + ResourceTrace::field("frame", uitos(pipeline_preparation->frame)) + ResourceTrace::field("shader_data_ptr", uitos(uint64_t(shader))) + ResourceTrace::field("version_rid", uitos(shader->version.get_id())) + ResourceTrace::field("path", shader->path) + ResourceTrace::field("key_hash", uitos(pipeline_hash)) + ResourceTrace::field("pass_mode", uitos(p_pass_mode)) + ResourceTrace::field("pipeline_policy", pipeline_preparation->get_pipeline_policy_name()) + ResourceTrace::field("draw_cull_mode", uitos(uint64_t(cull_mode))) + ResourceTrace::field("draw_packed_0", uitos(uint64_t(pipeline_specialization.packed_0))) + ResourceTrace::field("draw_packed_1", uitos(uint64_t(pipeline_specialization.packed_1))) + ResourceTrace::field("draw_packed_2", uitos(uint64_t(pipeline_specialization.packed_2))) + ResourceTrace::field("vertex_format_id", uitos(uint64_t(pipeline_key.vertex_format_id))) + ResourceTrace::field("framebuffer_format_id", uitos(uint64_t(pipeline_key.framebuffer_format_id))) + ResourceTrace::field("cull_mode", uitos(uint64_t(pipeline_key.cull_mode))) + ResourceTrace::field("primitive_type", uitos(uint64_t(pipeline_key.primitive_type))) + ResourceTrace::field("version", uitos(uint64_t(pipeline_key.version))) + ResourceTrace::field("render_pass", uitos(uint64_t(pipeline_key.render_pass))) + ResourceTrace::field("wireframe", uitos(uint64_t(pipeline_key.wireframe))) + ResourceTrace::field("ubershader", uitos(uint64_t(pipeline_key.ubershader))) + ResourceTrace::field("packed_0", uitos(uint64_t(pipeline_key.shader_specialization.packed_0))) + ResourceTrace::field("packed_1", uitos(uint64_t(pipeline_key.shader_specialization.packed_1))) + ResourceTrace::field("packed_2", uitos(uint64_t(pipeline_key.shader_specialization.packed_2))) + ResourceTrace::field("pipeline_rid", uitos(pipeline_rd.get_id())) + ResourceTrace::field("valid", pipeline_rd.is_valid() ? "true" : "false"));
 				}
 
 				if (pipeline_rd.is_valid()) {
@@ -2680,7 +2686,7 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 					prev_pipeline_hash = pipeline_hash;
 					break;
 				} else {
-					if (pipeline_key.ubershader == 1) {
+					if (pipeline_key.ubershader == 1 && !ubershader_only) {
 						// If ubershader failed to compile, retry specialized shader and wait for it to finish compilation.
 						// This prevents pop-in at the cost of shader compilation stutters.
 						pipeline_key.ubershader = 0;
@@ -3640,6 +3646,13 @@ RenderForwardMobile::RenderForwardMobile() {
 	singleton = this;
 
 	disable_ubershaders = RD::get_singleton()->get_driver_workarounds().disable_ubershaders;
+	ubershader_only = GLOBAL_GET("rendering/renderer/mobile_ubershader_only");
+	if (ubershader_only && disable_ubershaders) {
+		ERR_PRINT("Mobile ubershader-only rendering is unavailable: the rendering driver disables ubershaders.");
+	} else if (ubershader_only) {
+		print_verbose("Mobile pipeline policy: Ubershader only");
+	}
+	RESOURCE_TRACE_EVENT("mobile_pipeline_policy", ResourceTrace::field("policy", ubershader_only ? (disable_ubershaders ? "unavailable" : "ubershader_only") : "optimized") + ResourceTrace::field("ubershader_only", ubershader_only ? "true" : "false") + ResourceTrace::field("ubershaders_available", disable_ubershaders ? "false" : "true"));
 	if (disable_ubershaders) {
 		print_verbose("Ubershaders: Disabled");
 	} else {

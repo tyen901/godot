@@ -1432,6 +1432,7 @@ void RendererSceneCull::instance_set_visibility_parent(RID p_instance, RID p_par
 		old_parent->visibility_dependencies.erase(instance);
 		instance->visibility_parent = nullptr;
 		_update_instance_visibility_depth(old_parent);
+		_update_instance_visibility_dependencies(old_parent);
 	}
 
 	Instance *parent = instance_owner.get_or_null(p_parent_instance);
@@ -1526,6 +1527,7 @@ void RendererSceneCull::_update_instance_visibility_dependencies(Instance *p_ins
 			}
 		}
 
+		idata.flags &= ~InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN;
 		if ((has_visibility_range || p_instance->visibility_parent) && (p_instance->visibility_index == -1 || p_instance->visibility_dependencies_depth == 0)) {
 			idata.flags |= InstanceData::FLAG_VISIBILITY_DEPENDENCY_NEEDS_CHECK;
 		} else {
@@ -4434,6 +4436,12 @@ bool RendererSceneCull::free(RID p_rid) {
 		update_dirty_instances();
 
 		Instance *instance = instance_owner.get_or_null(p_rid);
+
+		instance_set_visibility_parent(p_rid, RID());
+		while (!instance->visibility_dependencies.is_empty()) {
+			Instance *dependency = *instance->visibility_dependencies.begin();
+			instance_set_visibility_parent(dependency->self, RID());
+		}
 
 		instance_geometry_set_lightmap(p_rid, RID(), Rect2(), 0);
 		instance_set_scenario(p_rid, RID());

@@ -36,6 +36,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 #ifdef __linux__
@@ -45,6 +46,71 @@
 
 namespace ResourceTrace {
 namespace {
+// Keep this selection local to diagnostics. It does not change the traced work,
+// public API, ownership, or native compilation/submission policy.
+constexpr const char *compilation_stages[] = {
+	"forward_clustered_pipeline", "forward_mobile_pipeline",
+	"material_shader", "material_shader_prepare", "material_shader_set_code", "mobile_pipeline_policy",
+	"pipeline_shader_variant_wait", "pipeline_task", "pipeline_task_wait",
+	"rd_framebuffer_format", "rd_render_pipeline", "rd_shader", "rd_vertex_format",
+	"resource_shader", "resource_shader_create", "respirv_optimize", "respirv_parse", "respirv_specialize",
+	"shader_baker_begin", "shader_baker_cache_packed", "shader_baker_complete", "shader_baker_container_encode",
+	"shader_baker_embedded_admission", "shader_baker_enable_features", "shader_baker_group_admitted",
+	"shader_baker_group_complete", "shader_baker_group_setup", "shader_baker_material_admission",
+	"shader_baker_progress_wait", "shader_baker_stage_compile", "shader_baker_variant_admission",
+	"shader_baker_version_admission", "shader_baker_work",
+	"shader_binary", "shader_cache_load", "shader_cache_path", "shader_decompress", "shader_from_bytecode",
+	"shader_group_wait", "shader_material", "shader_smolv_decode", "shader_stage_spirv",
+	"shader_variant_cache_restore", "shader_variant_compile", "shader_version", "variant_shader",
+	"viewport_preparation_begin", "viewport_preparation_end", "viewport_preparation_pipeline",
+	"vkCreateGraphicsPipelines", "vkCreateShaderModule", "vkCreateShaderModule_specialized",
+	"vulkan_pipeline_stage", "vulkan_render_pass", "vulkan_shader_container", "vulkan_shader_decoded",
+	"vulkan_shader_stage", "vulkan_vertex_format",
+};
+enum class Selection { FULL, COMPILATION, INVALID };
+Selection selection() {
+	static const Selection value = [] {
+		const char *name = std::getenv("GODOT_RESOURCE_TRACE_SELECTION");
+		if (!name || std::strcmp(name, "full") == 0) {
+			return Selection::FULL;
+		}
+		if (std::strcmp(name, "compilation") == 0) {
+			return Selection::COMPILATION;
+		}
+		std::fprintf(stderr, "Resource trace: invalid selection; expected full or compilation.\n");
+		return Selection::INVALID;
+	}();
+	return value;
+}
+bool selected(const char *p_stage) {
+	if (selection() == Selection::FULL) {
+		return true;
+	}
+	if (selection() == Selection::COMPILATION) {
+		for (const char *stage : compilation_stages) {
+			if (std::strcmp(stage, p_stage) == 0) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+String selection_fields() {
+	String fields = ",\"selection\":\"" + String(selection() == Selection::FULL ? "full" : "compilation") + "\",\"selection_version\":1";
+	if (selection() == Selection::COMPILATION) {
+		fields += ",\"retained_stages\":[";
+		bool first = true;
+		for (const char *stage : compilation_stages) {
+			if (!first) {
+				fields += ",";
+			}
+			fields += "\"" + String(stage) + "\"";
+			first = false;
+		}
+		fields += "],\"omitted_stages\":[\"vkQueueSubmit\",\"vulkan_submit_lock\",\"vkWaitForFences\",\"texture_readback\"]";
+	}
+	return fields;
+}
 struct Output {
 	std::mutex mutex;
 	FILE *file = nullptr;
@@ -52,6 +118,23 @@ struct Output {
 	uint64_t limit = 200000;
 	bool attempted = false;
 	bool stopped = false;
+	~Output() {
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!file) {
+			return;
+		}
+		// Ordinary FILE-owner finalization, not a timed engine event or success
+		// result. OS/Thread singletons may already be gone. A stopped writer
+		// must never acquire a clean termination receipt.
+		if (!stopped) {
+			if (std::fprintf(file, "{\"schema\":\"godot-resource-trace-v1\",\"phase\":\"anchor\",\"sequence\":%llu,\"capture_termination\":\"normal_finalization\",\"recorded_through_sequence\":%llu}\n", (unsigned long long)(sequence + 1), (unsigned long long)sequence) < 0 || std::fflush(file) != 0) {
+				std::fprintf(stderr, "Resource trace: finalization write failed.\n");
+			}
+		}
+		if (std::fclose(file) != 0) {
+			std::fprintf(stderr, "Resource trace: output close failed.\n");
+		}
+	}
 };
 Output &output() {
 	static Output value;
@@ -66,6 +149,12 @@ uint64_t native_thread_id() {
 #endif
 }
 uint64_t write(const char *p_phase, const char *p_stage, uint64_t p_operation, uint64_t p_parent, const String &p_fields) {
+	// A suppressed scope never consumes an ID or changes current_operation.
+	// Retained descendants keep the nearest retained parent; both endpoints of
+	// a retained scope use the same immutable stage selection.
+	if (!selected(p_stage)) {
+		return 0;
+	}
 	Output &out = output();
 	std::lock_guard<std::mutex> lock(out.mutex);
 	if (out.stopped) {
@@ -95,7 +184,8 @@ uint64_t write(const char *p_phase, const char *p_stage, uint64_t p_operation, u
 		return 0;
 	}
 	if (out.sequence == 0) {
-		std::fprintf(out.file, "{\"schema\":\"godot-resource-trace-v1\",\"phase\":\"anchor\",\"sequence\":0,\"ticks_usec\":%llu,\"unix_usec\":%llu,\"record_limit\":%llu}\n", (unsigned long long)OS::get_singleton()->get_ticks_usec(), (unsigned long long)(OS::get_singleton()->get_unix_time() * 1000000.0), (unsigned long long)out.limit);
+		CharString fields = selection_fields().utf8();
+		std::fprintf(out.file, "{\"schema\":\"godot-resource-trace-v1\",\"phase\":\"anchor\",\"sequence\":0,\"ticks_usec\":%llu,\"unix_usec\":%llu,\"record_limit\":%llu%s}\n", (unsigned long long)OS::get_singleton()->get_ticks_usec(), (unsigned long long)(OS::get_singleton()->get_unix_time() * 1000000.0), (unsigned long long)out.limit, fields.get_data());
 	}
 	uint64_t sequence = ++out.sequence;
 	uint64_t operation = p_operation ? p_operation : sequence;

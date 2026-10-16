@@ -566,7 +566,7 @@ RenderingServerTypes::ShaderNativeSourceCode ShaderRD::version_get_native_source
 }
 
 String ShaderRD::version_get_cache_file_relative_path(RID p_version, int p_group, const String &p_api_name) {
-	ERR_FAIL_INDEX_V(p_group, group_sha256.size(), String());
+	ERR_FAIL_INDEX_V(p_group, int64_t(group_sha256.size()), String());
 
 	Version *version = version_owner.get_or_null(p_version);
 	ERR_FAIL_NULL_V(version, String());

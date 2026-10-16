@@ -30,6 +30,7 @@
 
 #pragma once
 
+class ShaderRD;
 class String;
 template <typename T>
 class BitField;
@@ -44,8 +45,16 @@ public:
 		FEATURE_FP32_BIT = 1U << 4U,
 	};
 
-	// Used by the shader baker to globally enable features on all the shaders that will be exported.
-	virtual void enable_features(BitField<FeatureBits> p_feature_bits) = 0;
+	enum ShaderBakeGroupEligibility {
+		SHADER_BAKE_GROUP_EXCLUDED,
+		SHADER_BAKE_GROUP_INCLUDED,
+		SHADER_BAKE_GROUP_INVALID_FEATURES,
+		SHADER_BAKE_GROUP_INVALID_GROUP,
+		SHADER_BAKE_GROUP_UNAVAILABLE,
+	};
+
+	// Select export groups without enabling or compiling live rendering versions.
+	virtual ShaderBakeGroupEligibility get_shader_bake_group_eligibility(const ShaderRD *p_shader, int p_group, BitField<FeatureBits> p_feature_bits) const = 0;
 
 	// Used by the shader baker to reference by name the library.
 	virtual String get_name() const = 0;

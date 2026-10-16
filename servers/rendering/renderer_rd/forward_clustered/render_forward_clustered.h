@@ -862,7 +862,7 @@ public:
 
 	/* SHADER LIBRARY */
 
-	virtual void enable_features(BitField<FeatureBits> p_feature_bits) override;
+	virtual ShaderBakeGroupEligibility get_shader_bake_group_eligibility(const ShaderRD *p_shader, int p_group, BitField<FeatureBits> p_feature_bits) const override;
 	virtual String get_name() const override;
 
 	virtual bool free(RID p_rid) override;

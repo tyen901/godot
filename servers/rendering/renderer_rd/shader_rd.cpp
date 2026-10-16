@@ -437,12 +437,13 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 }
 
 Vector<String> ShaderRD::version_build_variant_stage_sources(RID p_version, int p_variant) {
+	ERR_FAIL_INDEX_V(p_variant, variant_defines.size(), Vector<String>());
+
 	Version *version = version_owner.get_or_null(p_version);
 	ERR_FAIL_NULL_V(version, Vector<String>());
 
-	if (version->dirty) {
-		_initialize_version(version);
-	}
+	MutexLock lock(*version->mutex);
+	// Reading source must preserve dirty state, live tasks, placeholders and RIDs.
 
 	CompileData compile_data;
 	compile_data.version = version;
@@ -565,9 +566,12 @@ RenderingServerTypes::ShaderNativeSourceCode ShaderRD::version_get_native_source
 }
 
 String ShaderRD::version_get_cache_file_relative_path(RID p_version, int p_group, const String &p_api_name) {
+	ERR_FAIL_INDEX_V(p_group, group_sha256.size(), String());
+
 	Version *version = version_owner.get_or_null(p_version);
 	ERR_FAIL_NULL_V(version, String());
 
+	MutexLock lock(*version->mutex);
 	return _get_cache_file_relative_path(version, p_group, p_api_name);
 }
 

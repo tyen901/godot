@@ -5167,18 +5167,50 @@ uint32_t RenderForwardClustered::get_pipeline_compilations(RSE::PipelineSource p
 	return scene_shader.get_pipeline_compilations(p_source);
 }
 
-void RenderForwardClustered::enable_features(BitField<FeatureBits> p_feature_bits) {
-	if (p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT)) {
-		scene_shader.enable_multiview_shader_group();
+RenderingShaderLibrary::ShaderBakeGroupEligibility RenderForwardClustered::get_shader_bake_group_eligibility(const ShaderRD *p_shader, int p_group, BitField<FeatureBits> p_feature_bits) const {
+	const uint64_t known_features = FEATURE_ADVANCED_BIT | FEATURE_MULTIVIEW_BIT | FEATURE_VRS_BIT | FEATURE_FP16_BIT | FEATURE_FP32_BIT;
+	if ((uint64_t(p_feature_bits) & ~known_features) != 0) {
+		return SHADER_BAKE_GROUP_INVALID_FEATURES;
+	}
+	if (p_shader == nullptr || p_group < 0 || p_group >= p_shader->get_group_count()) {
+		return SHADER_BAKE_GROUP_INVALID_GROUP;
 	}
 
-	if (p_feature_bits.has_flag(FEATURE_ADVANCED_BIT)) {
-		scene_shader.enable_advanced_shader_group(p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT));
+	if (p_shader == &scene_shader.shader) {
+		bool required_groups[SceneShaderForwardClustered::SHADER_GROUP_ADVANCED_MULTIVIEW + 1] = {};
+		const bool advanced = p_feature_bits.has_flag(FEATURE_ADVANCED_BIT);
+		const bool multiview = p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT);
+		required_groups[SceneShaderForwardClustered::SHADER_GROUP_ADVANCED] = advanced;
+		required_groups[SceneShaderForwardClustered::SHADER_GROUP_MULTIVIEW] = multiview;
+		required_groups[SceneShaderForwardClustered::SHADER_GROUP_ADVANCED_MULTIVIEW] = advanced && (multiview || RendererCompositorRD::get_singleton()->is_xr_enabled());
+
+		for (int group = 0; group <= SceneShaderForwardClustered::SHADER_GROUP_ADVANCED_MULTIVIEW; group++) {
+			if (required_groups[group] && (group >= p_shader->get_group_count() || p_shader->get_group_to_variants(group).is_empty())) {
+				return SHADER_BAKE_GROUP_UNAVAILABLE;
+			}
+		}
+		if (p_group > SceneShaderForwardClustered::SHADER_GROUP_ADVANCED_MULTIVIEW) {
+			return SHADER_BAKE_GROUP_INVALID_GROUP;
+		}
+		if (required_groups[p_group]) {
+			return SHADER_BAKE_GROUP_INCLUDED;
+		}
+	} else if (p_shader == &gi.shader) {
+		if (p_feature_bits.has_flag(FEATURE_VRS_BIT)) {
+			if (RendererRD::GI::GROUP_VRS >= p_shader->get_group_count() || p_shader->get_group_to_variants(RendererRD::GI::GROUP_VRS).is_empty()) {
+				return SHADER_BAKE_GROUP_UNAVAILABLE;
+			}
+			if (p_group == RendererRD::GI::GROUP_VRS) {
+				return SHADER_BAKE_GROUP_INCLUDED;
+			}
+		}
+		if (p_group > RendererRD::GI::GROUP_VRS) {
+			return SHADER_BAKE_GROUP_INVALID_GROUP;
+		}
 	}
 
-	if (p_feature_bits.has_flag(FEATURE_VRS_BIT)) {
-		gi.enable_vrs_shader_group();
-	}
+	// Other shader families and already enabled groups keep their live selection.
+	return p_shader->is_group_enabled(p_group) ? SHADER_BAKE_GROUP_INCLUDED : SHADER_BAKE_GROUP_EXCLUDED;
 }
 
 String RenderForwardClustered::get_name() const {

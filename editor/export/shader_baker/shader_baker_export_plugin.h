@@ -33,8 +33,10 @@
 #include "core/object/object.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/condition_variable.h"
+#include "core/templates/bit_field.h"
 #include "core/templates/rb_set.h"
 #include "editor/export/editor_export_plugin.h"
+#include "servers/rendering/rendering_shader_library.h"
 
 class ShaderRD;
 class RenderingShaderContainerFormat;
@@ -71,6 +73,7 @@ protected:
 		LocalVector<WorkerThreadPool::TaskID> variant_tasks;
 	};
 
+	BitField<RenderingShaderLibrary::FeatureBits> shader_bake_features = {};
 	String shader_cache_platform_name;
 	String shader_cache_renderer_name;
 	String shader_cache_export_path;

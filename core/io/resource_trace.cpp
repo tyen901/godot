@@ -55,7 +55,7 @@ constexpr const char *compilation_stages[] = {
 	"rd_framebuffer_format", "rd_render_pipeline", "rd_shader", "rd_vertex_format",
 	"resource_shader", "resource_shader_create", "respirv_optimize", "respirv_parse", "respirv_specialize",
 	"shader_baker_begin", "shader_baker_cache_packed", "shader_baker_complete", "shader_baker_container_encode",
-	"shader_baker_embedded_admission", "shader_baker_enable_features", "shader_baker_group_admitted",
+	"shader_baker_embedded_admission", "shader_baker_features", "shader_baker_group_admitted",
 	"shader_baker_group_complete", "shader_baker_group_setup", "shader_baker_material_admission",
 	"shader_baker_progress_wait", "shader_baker_stage_compile", "shader_baker_variant_admission",
 	"shader_baker_version_admission", "shader_baker_work",

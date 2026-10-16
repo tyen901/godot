@@ -430,22 +430,58 @@ uint32_t RenderForwardMobile::get_pipeline_compilations(RSE::PipelineSource p_so
 	return scene_shader.get_pipeline_compilations(p_source);
 }
 
-void RenderForwardMobile::enable_features(BitField<FeatureBits> p_feature_bits) {
-	if (p_feature_bits.has_flag(FEATURE_FP32_BIT)) {
-		scene_shader.enable_fp32_shader_group();
+RenderingShaderLibrary::ShaderBakeGroupEligibility RenderForwardMobile::get_shader_bake_group_eligibility(const ShaderRD *p_shader, int p_group, BitField<FeatureBits> p_feature_bits) const {
+	const uint64_t known_features = FEATURE_ADVANCED_BIT | FEATURE_MULTIVIEW_BIT | FEATURE_VRS_BIT | FEATURE_FP16_BIT | FEATURE_FP32_BIT;
+	if ((uint64_t(p_feature_bits) & ~known_features) != 0) {
+		return SHADER_BAKE_GROUP_INVALID_FEATURES;
+	}
+	if (p_shader == nullptr || p_group < 0 || p_group >= p_shader->get_group_count()) {
+		return SHADER_BAKE_GROUP_INVALID_GROUP;
 	}
 
-	if (p_feature_bits.has_flag(FEATURE_FP16_BIT)) {
-		scene_shader.enable_fp16_shader_group();
+	if (p_shader == &scene_shader.shader) {
+		const int64_t group_count = p_shader->get_group_count();
+		const bool request_fp32 = p_feature_bits.has_flag(FEATURE_FP32_BIT);
+		const bool request_fp16 = p_feature_bits.has_flag(FEATURE_FP16_BIT);
+		const bool enabled_fp32 = group_count > SceneShaderForwardMobile::SHADER_GROUP_FP32 && p_shader->is_group_enabled(SceneShaderForwardMobile::SHADER_GROUP_FP32);
+		const bool enabled_fp16 = group_count > SceneShaderForwardMobile::SHADER_GROUP_FP16 && p_shader->is_group_enabled(SceneShaderForwardMobile::SHADER_GROUP_FP16);
+		const bool live_multiview = (group_count > SceneShaderForwardMobile::SHADER_GROUP_FP32_MULTIVIEW && p_shader->is_group_enabled(SceneShaderForwardMobile::SHADER_GROUP_FP32_MULTIVIEW)) ||
+				(group_count > SceneShaderForwardMobile::SHADER_GROUP_FP16_MULTIVIEW && p_shader->is_group_enabled(SceneShaderForwardMobile::SHADER_GROUP_FP16_MULTIVIEW));
+		const bool multiview = p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT) || ((request_fp32 || request_fp16) && live_multiview);
+
+		bool required_groups[SceneShaderForwardMobile::SHADER_GROUP_FP16_MULTIVIEW + 1] = {};
+		required_groups[SceneShaderForwardMobile::SHADER_GROUP_FP32] = request_fp32;
+		required_groups[SceneShaderForwardMobile::SHADER_GROUP_FP16] = request_fp16;
+		required_groups[SceneShaderForwardMobile::SHADER_GROUP_FP32_MULTIVIEW] = (enabled_fp32 || request_fp32) && multiview;
+		required_groups[SceneShaderForwardMobile::SHADER_GROUP_FP16_MULTIVIEW] = (enabled_fp16 || request_fp16) && multiview;
+
+		for (int group = 0; group <= SceneShaderForwardMobile::SHADER_GROUP_FP16_MULTIVIEW; group++) {
+			if (required_groups[group] && (group >= group_count || p_shader->get_group_to_variants(group).is_empty())) {
+				return SHADER_BAKE_GROUP_UNAVAILABLE;
+			}
+		}
+		if (p_group > SceneShaderForwardMobile::SHADER_GROUP_FP16_MULTIVIEW) {
+			return SHADER_BAKE_GROUP_INVALID_GROUP;
+		}
+		if (required_groups[p_group]) {
+			return SHADER_BAKE_GROUP_INCLUDED;
+		}
+	} else if (p_shader == &gi.shader) {
+		if (p_feature_bits.has_flag(FEATURE_VRS_BIT)) {
+			if (RendererRD::GI::GROUP_VRS >= p_shader->get_group_count() || p_shader->get_group_to_variants(RendererRD::GI::GROUP_VRS).is_empty()) {
+				return SHADER_BAKE_GROUP_UNAVAILABLE;
+			}
+			if (p_group == RendererRD::GI::GROUP_VRS) {
+				return SHADER_BAKE_GROUP_INCLUDED;
+			}
+		}
+		if (p_group > RendererRD::GI::GROUP_VRS) {
+			return SHADER_BAKE_GROUP_INVALID_GROUP;
+		}
 	}
 
-	if (p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT)) {
-		scene_shader.enable_multiview_shader_group();
-	}
-
-	if (p_feature_bits.has_flag(FEATURE_VRS_BIT)) {
-		gi.enable_vrs_shader_group();
-	}
+	// Other shader families and already enabled groups keep their live selection.
+	return p_shader->is_group_enabled(p_group) ? SHADER_BAKE_GROUP_INCLUDED : SHADER_BAKE_GROUP_EXCLUDED;
 }
 
 String RenderForwardMobile::get_name() const {

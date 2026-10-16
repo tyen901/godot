@@ -122,28 +122,25 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	to_hash.append(shader_cache_renderer_name);
 	customization_configuration_hash = to_hash.as_string().hash64();
 
-	BitField<RenderingShaderLibrary::FeatureBits> renderer_features = {};
+	shader_bake_features = {};
 #ifndef XR_DISABLED
 	bool xr_enabled = GLOBAL_GET("xr/shaders/enabled");
-	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_ADVANCED_BIT);
+	shader_bake_features.set_flag(RenderingShaderLibrary::FEATURE_ADVANCED_BIT);
 	if (xr_enabled) {
-		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_MULTIVIEW_BIT);
+		shader_bake_features.set_flag(RenderingShaderLibrary::FEATURE_MULTIVIEW_BIT);
 	}
 #endif // XR_DISABLED
 
 	int vrs_mode = GLOBAL_GET("rendering/vrs/mode");
 	if (vrs_mode != 0) {
-		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_VRS_BIT);
+		shader_bake_features.set_flag(RenderingShaderLibrary::FEATURE_VRS_BIT);
 	}
 
 	// Both FP16 and FP32 variants should be included.
-	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP16_BIT);
-	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP32_BIT);
+	shader_bake_features.set_flag(RenderingShaderLibrary::FEATURE_FP16_BIT);
+	shader_bake_features.set_flag(RenderingShaderLibrary::FEATURE_FP32_BIT);
 
-	{
-		RESOURCE_TRACE_SCOPE(trace_features, "shader_baker_enable_features", ResourceTrace::field("renderer", shader_cache_renderer_name) + ResourceTrace::field("driver", shader_container_driver) + ResourceTrace::field("features", uitos(uint64_t(renderer_features))));
-		RendererSceneRenderRD::get_singleton()->enable_features(renderer_features);
-	}
+	RESOURCE_TRACE_EVENT("shader_baker_features", ResourceTrace::field("renderer", shader_cache_renderer_name) + ResourceTrace::field("driver", shader_container_driver) + ResourceTrace::field("features", uitos(uint64_t(shader_bake_features))));
 
 	// Included all shaders created by renderers and effects.
 	RESOURCE_TRACE_SCOPE(trace_embedded, "shader_baker_embedded_admission", String());
@@ -185,8 +182,8 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 		return false;
 	}
 
-	if (shader_container_format == nullptr) {
-		// Resource customization failed to initialize.
+	if (shader_container_format == nullptr || tasks_cancelled) {
+		// Resource customization failed to initialize or was cancelled.
 		return false;
 	}
 
@@ -195,8 +192,8 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 
 void ShaderBakerExportPlugin::_end_customize_resources() {
 	RESOURCE_TRACE_SCOPE(trace_end, "shader_baker_complete", ResourceTrace::field("task_count", uitos(tasks_total)) + ResourceTrace::field("group_count", uitos(shader_group_items.size())));
-	if (!_initialize_cache_directory()) {
-		return;
+	if (!tasks_cancelled && !_initialize_cache_directory()) {
+		tasks_cancelled = true;
 	}
 
 	// Run a progress bar that waits for all shader baking tasks to finish.
@@ -299,6 +296,10 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 }
 
 Ref<Resource> ShaderBakerExportPlugin::_customize_resource(const Ref<Resource> &p_resource, const String &p_path) {
+	if (tasks_cancelled) {
+		return Ref<Resource>();
+	}
+
 	RendererRD::MaterialStorage *singleton = RendererRD::MaterialStorage::get_singleton();
 	DEV_ASSERT(singleton != nullptr);
 
@@ -395,6 +396,13 @@ uint64_t ShaderBakerExportPlugin::_get_customization_configuration_hash() const 
 }
 
 void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID p_version) {
+	if (tasks_cancelled) {
+		return;
+	}
+
+	// Admission runs synchronously on the editor main/render owner thread without
+	// pumping events. Material Refs or the locked embedded registries retain this
+	// version until its cache keys and stage sources have all been copied.
 	RESOURCE_TRACE_SCOPE(trace_version, "shader_baker_version_admission", ResourceTrace::field("shader_family", p_shader->get_name()) + ResourceTrace::field("version_rid", uitos(p_version.get_id())));
 	const uint32_t tasks_before = tasks_total;
 	const int64_t variant_count = p_shader->get_variant_count();
@@ -404,12 +412,38 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 
 	RBSet<uint32_t> groups_to_compile;
 	for (int64_t i = 0; i < group_count; i++) {
-		if (!p_shader->is_group_enabled(i)) {
+		RenderingShaderLibrary::ShaderBakeGroupEligibility eligibility = RendererSceneRenderRD::get_singleton()->get_shader_bake_group_eligibility(p_shader, i, shader_bake_features);
+		if (eligibility == RenderingShaderLibrary::SHADER_BAKE_GROUP_EXCLUDED) {
 			continue;
 		}
+		if (eligibility != RenderingShaderLibrary::SHADER_BAKE_GROUP_INCLUDED) {
+			String reason;
+			switch (eligibility) {
+				case RenderingShaderLibrary::SHADER_BAKE_GROUP_INVALID_FEATURES:
+					reason = TTR("Unknown feature bits.");
+					break;
+				case RenderingShaderLibrary::SHADER_BAKE_GROUP_INVALID_GROUP:
+					reason = TTR("Invalid shader group.");
+					break;
+				case RenderingShaderLibrary::SHADER_BAKE_GROUP_UNAVAILABLE:
+					reason = TTR("Required shader group is unavailable.");
+					break;
+				default:
+					reason = TTR("Invalid shader baking selection.");
+					break;
+			}
+			get_export_platform()->add_message(EditorExportPlatform::EXPORT_MESSAGE_ERROR, TTR("Shader Baker"), vformat(TTR("%s Shader: %s, group: %d, features: %d."), reason, p_shader->get_name(), i, uint64_t(shader_bake_features)));
+			tasks_cancelled = true;
+			return;
+		}
 
-		RESOURCE_TRACE_SCOPE(trace_group, "shader_baker_group_setup", ResourceTrace::field("shader_family", p_shader->get_name()) + ResourceTrace::field("version_rid", uitos(p_version.get_id())) + ResourceTrace::field("group", itos(i)));
+		RESOURCE_TRACE_SCOPE(trace_group, "shader_baker_group_setup", ResourceTrace::field("shader_family", p_shader->get_name()) + ResourceTrace::field("version_rid", uitos(p_version.get_id())) + ResourceTrace::field("group", itos(i)) + ResourceTrace::field("live_enabled", uitos(uint64_t(p_shader->is_group_enabled(i)))) + ResourceTrace::field("features", uitos(uint64_t(shader_bake_features))));
 		String cache_path = p_shader->version_get_cache_file_relative_path(p_version, i, shader_container_driver);
+		if (cache_path.is_empty()) {
+			get_export_platform()->add_message(EditorExportPlatform::EXPORT_MESSAGE_ERROR, TTR("Shader Baker"), vformat(TTR("Shader cache identity is unavailable. Shader: %s, group: %d."), p_shader->get_name(), i));
+			tasks_cancelled = true;
+			return;
+		}
 		if (shader_paths_processed.has(cache_path)) {
 			if (ResourceTrace::enabled()) {
 				trace_group.finish(ResourceTrace::field("cache_path", cache_path) + ResourceTrace::field("already_processed", "1"));

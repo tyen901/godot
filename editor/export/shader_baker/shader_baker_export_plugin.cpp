@@ -190,6 +190,16 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 	return true;
 }
 
+void ShaderBakerExportPlugin::_export_end() {
+	if (shader_container_format == nullptr) {
+		return;
+	}
+
+	// An outer export error can bypass resource customization completion.
+	tasks_cancelled = true;
+	_end_customize_resources();
+}
+
 void ShaderBakerExportPlugin::_end_customize_resources() {
 	RESOURCE_TRACE_SCOPE(trace_end, "shader_baker_complete", ResourceTrace::field("task_count", uitos(tasks_total)) + ResourceTrace::field("group_count", uitos(shader_group_items.size())));
 	if (!tasks_cancelled && !_initialize_cache_directory()) {

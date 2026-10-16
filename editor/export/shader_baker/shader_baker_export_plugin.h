@@ -92,6 +92,7 @@ protected:
 	ConditionVariable tasks_condition;
 
 	virtual String get_name() const override;
+	virtual void _export_end() override;
 	virtual bool _is_active(const Vector<String> &p_features) const;
 	virtual bool _initialize_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset);
 	virtual void _cleanup_container_format();
